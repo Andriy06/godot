@@ -651,7 +651,12 @@ void RaycastOcclusionCull::_init_embree() {
 	_MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 #endif
 
+#ifdef THREADS_ENABLED
 	String settings = vformat("threads=%d", MAX(1, OS::get_singleton()->get_processor_count() - 2));
+#else
+	// [single-threaded build] Embree must not spawn its own worker threads.
+	String settings = "threads=1,set_affinity=0";
+#endif
 	ebr_device = rtcNewDevice(settings.utf8().ptr());
 }
 

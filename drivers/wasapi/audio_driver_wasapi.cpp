@@ -599,7 +599,12 @@ Error AudioDriverWASAPI::init() {
 	Error err = init_output_device();
 	ERR_FAIL_COND_V_MSG(err != OK, err, "WASAPI: init_output_device error.");
 
+#ifdef THREADS_ENABLED
 	thread.start(thread_func, this);
+#else
+	// [single-threaded build] the audio mix loop is the one permitted real OS thread.
+	thread = std::thread(&AudioDriverWASAPI::thread_func, this);
+#endif
 
 	return OK;
 }
@@ -1000,9 +1005,15 @@ void AudioDriverWASAPI::unlock() {
 
 void AudioDriverWASAPI::finish() {
 	exit_thread.set();
+#ifdef THREADS_ENABLED
 	if (thread.is_started()) {
 		thread.wait_to_finish();
 	}
+#else
+	if (thread.joinable()) {
+		thread.join();
+	}
+#endif
 
 	finish_input_device();
 	finish_output_device();

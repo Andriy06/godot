@@ -42,6 +42,13 @@
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 
+#ifndef THREADS_ENABLED
+// [single-threaded build] The audio driver is the one permitted real OS thread.
+// With `threads=no` Godot's Thread/Mutex are no-op stubs, so use the std types directly.
+#include <mutex>
+#include <thread>
+#endif
+
 class AudioDriverWASAPI : public AudioDriver {
 	class AudioDeviceWASAPI {
 	public:
@@ -64,8 +71,14 @@ class AudioDriverWASAPI : public AudioDriver {
 	AudioDeviceWASAPI audio_input;
 	AudioDeviceWASAPI audio_output;
 
+#ifdef THREADS_ENABLED
 	Mutex mutex;
 	Thread thread;
+#else
+	// [single-threaded build] real thread + real mutex, see note above.
+	mutable std::recursive_mutex mutex;
+	std::thread thread;
+#endif
 
 	Vector<int32_t> samples_in;
 
