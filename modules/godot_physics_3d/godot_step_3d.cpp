@@ -31,6 +31,7 @@
 #include "godot_step_3d.h"
 
 #include "godot_constraint_3d.h"
+#include "core/profiling/profiling.h" // [perf-zones]
 
 #include "core/object/worker_thread_pool.h"
 #include "core/os/os.h"
@@ -183,6 +184,7 @@ void GodotStep3D::_check_suspend(const LocalVector<GodotBody3D *> &p_body_island
 }
 
 void GodotStep3D::step(GodotSpace3D *p_space, real_t p_delta) {
+	GodotProfileZone("GodotStep3D::step");
 	p_space->lock(); // can't access space during this
 
 	p_space->setup(); //update inertias, etc

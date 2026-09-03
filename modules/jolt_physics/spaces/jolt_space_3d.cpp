@@ -31,6 +31,7 @@
 #include "jolt_space_3d.h"
 
 #include "../joints/jolt_joint_3d.h"
+#include "core/profiling/profiling.h" // [perf-zones]
 #include "../jolt_physics_server_3d.h"
 #include "../jolt_project_settings.h"
 #include "../misc/jolt_stream_wrappers.h"
@@ -188,6 +189,7 @@ JoltSpace3D::~JoltSpace3D() {
 }
 
 void JoltSpace3D::step(float p_step) {
+	GodotProfileZone("JoltSpace3D::step");
 	stepping = true;
 	last_step = p_step;
 
@@ -222,6 +224,7 @@ void JoltSpace3D::step(float p_step) {
 }
 
 void JoltSpace3D::call_queries() {
+	GodotProfileZone("JoltSpace3D::call_queries");
 	while (body_call_queries_list.first()) {
 		JoltBody3D *body = body_call_queries_list.first()->self();
 		body_call_queries_list.remove(body_call_queries_list.first());

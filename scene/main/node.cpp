@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "node.h"
+#include "core/profiling/profiling.h" // [perf-zones]
 #include "node.compat.inc"
 
 STATIC_ASSERT_INCOMPLETE_TYPE(class, Mesh);
@@ -97,10 +98,12 @@ void Node::_notification(int p_notification) {
 		} break;
 
 		case NOTIFICATION_PROCESS: {
+			GodotProfileZone("script _process");
 			GDVIRTUAL_CALL(_process, get_process_delta_time());
 		} break;
 
 		case NOTIFICATION_PHYSICS_PROCESS: {
+			GodotProfileZone("script _physics_process");
 			GDVIRTUAL_CALL(_physics_process, get_physics_process_delta_time());
 		} break;
 

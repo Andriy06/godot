@@ -31,6 +31,7 @@
 #include "message_queue.h"
 
 #include "core/config/project_settings.h"
+#include "core/profiling/profiling.h" // [perf-zones]
 
 #include <cstdio>
 
@@ -222,6 +223,7 @@ void CallQueue::_call_function(const Callable &p_callable, const Variant *p_args
 }
 
 Error CallQueue::flush() {
+	GodotProfileZone("CallQueue::flush");
 	LOCK_MUTEX;
 
 	if (pages.is_empty()) {

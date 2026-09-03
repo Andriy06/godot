@@ -32,6 +32,7 @@
 #include "animation_mixer.compat.inc"
 
 #include "core/config/engine.h"
+#include "core/profiling/profiling.h" // [perf-zones]
 #include "core/config/project_settings.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
@@ -1024,6 +1025,7 @@ bool AnimationMixer::_update_caches() {
 /* -------------------------------------------- */
 
 void AnimationMixer::_process_animation(double p_delta, bool p_update_only) {
+	GodotProfileZone("AnimationMixer::_process_animation");
 	_blend_init();
 	if (cache_valid && _blend_pre_process(p_delta, track_count, track_map)) {
 		_blend_capture(p_delta);

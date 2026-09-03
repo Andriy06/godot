@@ -1,4 +1,5 @@
 /**************************************************************************/
+// [perf-zones]
 /*  scene_tree.cpp                                                        */
 /**************************************************************************/
 /*                         This file is part of:                          */
@@ -199,6 +200,7 @@ void SceneTree::remove_from_group(const StringName &p_group, Node *p_node) {
 
 void SceneTree::flush_transform_notifications() {
 	_THREAD_SAFE_METHOD_
+	GodotProfileZone("SceneTree::flush_transform_notifications");
 
 	SelfList<Node> *n = xform_change_list.first();
 	while (n) {
@@ -1248,6 +1250,7 @@ void SceneTree::_process_groups_thread(uint32_t p_index, bool p_physics) {
 }
 
 void SceneTree::_process(bool p_physics) {
+	GodotProfileZone("SceneTree::_process (node callbacks)");
 	if (process_groups_dirty) {
 		{
 			// First, remove dirty groups.

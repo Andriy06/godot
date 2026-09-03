@@ -30,6 +30,7 @@
 
 #include "skeleton_3d.h"
 #include "skeleton_3d.compat.inc"
+#include "core/profiling/profiling.h" // [perf-zones]
 
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
@@ -1129,6 +1130,7 @@ void Skeleton3D::_force_update_all_dirty_bones() const {
 }
 
 void Skeleton3D::force_update_all_bone_transforms() {
+	GodotProfileZone("Skeleton3D::force_update_all_bone_transforms");
 	_force_update_all_bone_transforms();
 }
 

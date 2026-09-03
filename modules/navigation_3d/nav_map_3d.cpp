@@ -31,6 +31,7 @@
 #include "nav_map_3d.h"
 
 #include "3d/nav_map_builder_3d.h"
+#include "core/profiling/profiling.h" // [perf-zones]
 #include "3d/nav_mesh_queries_3d.h"
 #include "3d/nav_region_iteration_3d.h"
 #include "nav_agent_3d.h"
@@ -428,6 +429,7 @@ void NavMap3D::_sync_iteration() {
 }
 
 void NavMap3D::sync() {
+	GodotProfileZone("NavMap3D::sync");
 	// Performance Monitor.
 	performance_data.pm_region_count = regions.size();
 	performance_data.pm_agent_count = agents.size();
