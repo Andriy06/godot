@@ -32,6 +32,8 @@
 
 #include "core/typedefs.h"
 
+#ifdef THREADS_ENABLED
+
 #ifdef MINGW_ENABLED
 #define MINGW_STDTHREAD_REDUNDANCY_WARNING
 #include <thirdparty/mingw-std-threads/mingw.shared_mutex.h>
@@ -75,6 +77,26 @@ public:
 		return mutex.try_lock();
 	}
 };
+
+#else // No threads.
+
+// [single-threaded build] With `threads=no` the only OS thread that can reach
+// any of these locks is the main thread (the WASAPI mix thread never touches
+// them), so the reader/writer lock degenerates to a no-op. Unlike Mutex/SpinLock,
+// upstream leaves RWLock as a real std::shared_mutex even without THREADS_ENABLED,
+// which costs an interlocked SRWLOCK operation on every ClassDB lookup, every
+// navigation map query, etc.
+class RWLock {
+public:
+	_ALWAYS_INLINE_ void read_lock() const {}
+	_ALWAYS_INLINE_ void read_unlock() const {}
+	_ALWAYS_INLINE_ bool read_try_lock() const { return true; }
+	_ALWAYS_INLINE_ void write_lock() {}
+	_ALWAYS_INLINE_ void write_unlock() {}
+	_ALWAYS_INLINE_ bool write_try_lock() { return true; }
+};
+
+#endif // THREADS_ENABLED
 
 class RWLockRead {
 	const RWLock &lock;
