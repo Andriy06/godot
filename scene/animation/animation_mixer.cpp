@@ -1026,15 +1026,38 @@ bool AnimationMixer::_update_caches() {
 
 void AnimationMixer::_process_animation(double p_delta, bool p_update_only) {
 	GodotProfileZone("AnimationMixer::_process_animation");
-	_blend_init();
-	if (cache_valid && _blend_pre_process(p_delta, track_count, track_map)) {
-		_blend_capture(p_delta);
-		_blend_calc_total_weight();
-		_blend_process(p_delta, p_update_only);
-		clear_animation_instances();
-		_blend_apply();
-		_blend_post_process();
-		emit_signal(SNAME("mixer_applied"));
+	{
+		GodotProfileZone("mixer: blend_init");
+		_blend_init();
+	}
+	bool pre_ok = false;
+	{
+		GodotProfileZone("mixer: pre_process");
+		pre_ok = cache_valid && _blend_pre_process(p_delta, track_count, track_map);
+	}
+	if (pre_ok) {
+		{
+			GodotProfileZone("mixer: capture+weights");
+			_blend_capture(p_delta);
+			_blend_calc_total_weight();
+		}
+		{
+			GodotProfileZone("mixer: blend_process");
+			_blend_process(p_delta, p_update_only);
+		}
+		{
+			GodotProfileZone("mixer: clear_instances");
+			clear_animation_instances();
+		}
+		{
+			GodotProfileZone("mixer: blend_apply");
+			_blend_apply();
+		}
+		{
+			GodotProfileZone("mixer: post_process+signal");
+			_blend_post_process();
+			emit_signal(SNAME("mixer_applied"));
+		}
 	} else {
 		clear_animation_instances();
 	}

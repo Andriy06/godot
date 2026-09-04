@@ -30,6 +30,8 @@
 
 #include "character_body_3d.h"
 
+#include "core/profiling/profiling.h"
+
 #include "core/config/engine.h"
 #include "core/object/class_db.h"
 
@@ -41,6 +43,7 @@
 #define FLOOR_ANGLE_THRESHOLD 0.01
 
 bool CharacterBody3D::move_and_slide() {
+	GodotProfileZone("CharacterBody3D::move_and_slide");
 	// Hack in order to work with calling from _process as well as from _physics_process; calling from thread is risky
 	double delta = Engine::get_singleton()->is_in_physics_frame() ? get_physics_process_delta_time() : get_process_delta_time();
 

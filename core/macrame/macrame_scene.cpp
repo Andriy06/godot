@@ -100,8 +100,20 @@ bool MacrameScene::is_enabled() {
 	return state != nullptr;
 }
 
+namespace {
+int active_shard_count() {
+	// MACRAME_SHARDS=<n> caps how many of the shards receive groups (scaling experiments).
+	static int n = [] {
+		String v = OS::get_singleton()->get_environment("MACRAME_SHARDS");
+		int c = v.is_empty() ? MacrameScene::SHARD_COUNT : v.to_int();
+		return CLAMP(c, 1, MacrameScene::SHARD_COUNT);
+	}();
+	return n;
+}
+} // namespace
+
 int MacrameScene::assign_shard() {
-	return state ? state->next_shard.fetch_add(1) % SHARD_COUNT : -1;
+	return state ? state->next_shard.fetch_add(1) % active_shard_count() : -1;
 }
 
 MACRAME_NO_INLINE int MacrameScene::current_shard() {

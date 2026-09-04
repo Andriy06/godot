@@ -30,6 +30,8 @@
 
 #include "physics_body_3d.h"
 
+#include "core/profiling/profiling.h"
+
 #include "core/object/class_db.h"
 #include "scene/main/scene_tree.h"
 
@@ -110,7 +112,11 @@ Ref<KinematicCollision3D> PhysicsBody3D::_move(const Vector3 &p_motion, bool p_t
 }
 
 bool PhysicsBody3D::move_and_collide(const PS3DT::MotionParameters &p_parameters, PS3DT::MotionResult &r_result, bool p_test_only, bool p_cancel_sliding) {
-	bool colliding = PhysicsServer3D::get_singleton()->body_test_motion(get_rid(), p_parameters, &r_result);
+	bool colliding;
+	{
+		GodotProfileZone("PhysicsServer3D::body_test_motion");
+		colliding = PhysicsServer3D::get_singleton()->body_test_motion(get_rid(), p_parameters, &r_result);
+	}
 
 	// Restore direction of motion to be along original motion,
 	// in order to avoid sliding due to recovery,
