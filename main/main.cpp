@@ -4997,6 +4997,23 @@ bool Main::iteration() {
 			break;
 		}
 
+#ifdef MACRAME_ENABLED
+		// Macrame: the physics step is an asynchronous task on the space; launching it before the
+		// navigation update lets the two overlap (navigation reads agent state the scripts set,
+		// not the space; its results reach scripts next tick either way).
+#endif
+#ifndef PHYSICS_3D_DISABLED
+		GodotProfileZoneGrouped(_profile_zone, "3D physics");
+		PhysicsServer3D::get_singleton()->end_sync();
+		PhysicsServer3D::get_singleton()->step(physics_step * time_scale);
+#endif // PHYSICS_3D_DISABLED
+
+#ifndef PHYSICS_2D_DISABLED
+		GodotProfileZoneGrouped(_profile_zone, "2D physics");
+		PhysicsServer2D::get_singleton()->end_sync();
+		PhysicsServer2D::get_singleton()->step(physics_step * time_scale);
+#endif // PHYSICS_2D_DISABLED
+
 #if !defined(NAVIGATION_2D_DISABLED) || !defined(NAVIGATION_3D_DISABLED)
 		uint64_t navigation_begin = OS::get_singleton()->get_ticks_usec();
 
@@ -5014,18 +5031,6 @@ bool Main::iteration() {
 
 		message_queue->flush();
 #endif // !defined(NAVIGATION_2D_DISABLED) || !defined(NAVIGATION_3D_DISABLED)
-
-#ifndef PHYSICS_3D_DISABLED
-		GodotProfileZoneGrouped(_profile_zone, "3D physics");
-		PhysicsServer3D::get_singleton()->end_sync();
-		PhysicsServer3D::get_singleton()->step(physics_step * time_scale);
-#endif // PHYSICS_3D_DISABLED
-
-#ifndef PHYSICS_2D_DISABLED
-		GodotProfileZoneGrouped(_profile_zone, "2D physics");
-		PhysicsServer2D::get_singleton()->end_sync();
-		PhysicsServer2D::get_singleton()->step(physics_step * time_scale);
-#endif // PHYSICS_2D_DISABLED
 
 		message_queue->flush();
 
