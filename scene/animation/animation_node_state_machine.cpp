@@ -1077,11 +1077,24 @@ Ref<AnimationNodeStateMachineTransition> AnimationNodeStateMachinePlayback::_che
 AnimationNodeStateMachinePlayback::NextInfo AnimationNodeStateMachinePlayback::_find_next(AnimationNode::ProcessState &p_process_state, AnimationNodeInstance &p_instance, AnimationTree *p_tree, AnimationNodeStateMachine *p_state_machine) const {
 	GodotProfileZone("sm: _find_next");
 	NextInfo next;
+	// The transition resources are shared by every instance of this graph. Copying a Ref per
+	// transition per tick is a reference-count storm across threads (measured: a fifth of all
+	// CPU at 16 shards), so the common, non-grouped path reads them by reference and the
+	// state-machine handle is taken once.
+	const bool grouped = p_state_machine->get_state_machine_type() == AnimationNodeStateMachine::STATE_MACHINE_TYPE_GROUPED;
+	Ref<AnimationNodeStateMachine> anodesm = p_state_machine;
+	Ref<AnimationNodeStateMachineTransition> group_holder;
 	if (path.size()) {
 		for (int i = 0; i < p_state_machine->transitions.size(); i++) {
-			Ref<AnimationNodeStateMachine> anodesm = p_state_machine;
 			bool bypass = false;
-			Ref<AnimationNodeStateMachineTransition> ref_transition = _check_group_transition(p_tree, p_state_machine, p_state_machine->transitions[i], anodesm, bypass);
+			const AnimationNodeStateMachineTransition *ref_transition = p_state_machine->transitions[i].transition.ptr();
+			if (grouped) {
+				if (anodesm.ptr() != p_state_machine) {
+					anodesm = p_state_machine;
+				}
+				group_holder = _check_group_transition(p_tree, p_state_machine, p_state_machine->transitions[i], anodesm, bypass);
+				ref_transition = group_holder.ptr();
+			}
 			if (ref_transition->get_advance_mode() == AnimationNodeStateMachineTransition::ADVANCE_MODE_DISABLED) {
 				continue;
 			}
@@ -1098,13 +1111,20 @@ AnimationNodeStateMachinePlayback::NextInfo AnimationNodeStateMachinePlayback::_
 		int auto_advance_to = -1;
 		float priority_best = 1e20;
 		for (int i = 0; i < p_state_machine->transitions.size(); i++) {
-			Ref<AnimationNodeStateMachine> anodesm = p_state_machine;
 			bool bypass = false;
-			Ref<AnimationNodeStateMachineTransition> ref_transition = _check_group_transition(p_tree, p_state_machine, p_state_machine->transitions[i], anodesm, bypass);
+			const Ref<AnimationNodeStateMachineTransition> *tref = &p_state_machine->transitions[i].transition;
+			if (grouped) {
+				if (anodesm.ptr() != p_state_machine) {
+					anodesm = p_state_machine;
+				}
+				group_holder = _check_group_transition(p_tree, p_state_machine, p_state_machine->transitions[i], anodesm, bypass);
+				tref = &group_holder;
+			}
+			const AnimationNodeStateMachineTransition *ref_transition = tref->ptr();
 			if (ref_transition->get_advance_mode() == AnimationNodeStateMachineTransition::ADVANCE_MODE_DISABLED) {
 				continue;
 			}
-			if (p_state_machine->transitions[i].from == current && (_check_advance_condition(p_process_state, p_instance, anodesm, ref_transition) || bypass)) {
+			if (p_state_machine->transitions[i].from == current && (_check_advance_condition(p_process_state, p_instance, anodesm, *tref) || bypass)) {
 				if (ref_transition->get_priority() <= priority_best) {
 					priority_best = ref_transition->get_priority();
 					auto_advance_to = i;
@@ -1114,9 +1134,15 @@ AnimationNodeStateMachinePlayback::NextInfo AnimationNodeStateMachinePlayback::_
 
 		if (auto_advance_to != -1) {
 			next.node = p_state_machine->transitions[auto_advance_to].to;
-			Ref<AnimationNodeStateMachine> anodesm = p_state_machine;
 			bool bypass = false;
-			Ref<AnimationNodeStateMachineTransition> ref_transition = _check_group_transition(p_tree, p_state_machine, p_state_machine->transitions[auto_advance_to], anodesm, bypass);
+			const AnimationNodeStateMachineTransition *ref_transition = p_state_machine->transitions[auto_advance_to].transition.ptr();
+			if (grouped) {
+				if (anodesm.ptr() != p_state_machine) {
+					anodesm = p_state_machine;
+				}
+				group_holder = _check_group_transition(p_tree, p_state_machine, p_state_machine->transitions[auto_advance_to], anodesm, bypass);
+				ref_transition = group_holder.ptr();
+			}
 			next.xfade = ref_transition->get_xfade_time();
 			next.curve = ref_transition->get_xfade_curve();
 			next.switch_mode = ref_transition->get_switch_mode();
@@ -1128,7 +1154,7 @@ AnimationNodeStateMachinePlayback::NextInfo AnimationNodeStateMachinePlayback::_
 	return next;
 }
 
-bool AnimationNodeStateMachinePlayback::_check_advance_condition(AnimationNode::ProcessState &p_process_state, AnimationNodeInstance &p_instance, const Ref<AnimationNodeStateMachine> state_machine, const Ref<AnimationNodeStateMachineTransition> transition) const {
+bool AnimationNodeStateMachinePlayback::_check_advance_condition(AnimationNode::ProcessState &p_process_state, AnimationNodeInstance &p_instance, const Ref<AnimationNodeStateMachine> &state_machine, const Ref<AnimationNodeStateMachineTransition> &transition) const {
 	if (transition->get_advance_mode() != AnimationNodeStateMachineTransition::ADVANCE_MODE_AUTO) {
 		return false;
 	}
