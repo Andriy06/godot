@@ -454,7 +454,14 @@ void RenderingServerDefault::set_physics_interpolation_enabled(bool p_enabled) {
 
 void RenderingServerDefault::sync() {
 #ifdef MACRAME_ENABLED
-	// Wait for the in-flight draw, then apply every command the frame staged, as one write.
+	// The frame loop calls this at the top of every iteration. Joining the in-flight draw here
+	// would serialize simulation behind rendering (the separate-thread mode does exactly that);
+	// instead the next draw() joins it, applies the staged batch under the grant and launches.
+	// Synchronous getters and direct calls still join through flush_if_pending(). Shutdown
+	// (finish) waits explicitly.
+	if (command_queue.is_in_flight()) {
+		return;
+	}
 	command_queue.sync();
 	return;
 #endif
@@ -473,6 +480,7 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 #ifdef MACRAME_ENABLED
 	// The draw runs as an asynchronous write task on the renderer and overlaps the next
 	// frame's simulation; the next sync() joins it. sync() has already applied the batch.
+	command_queue.sync(); // Join the previous draw and apply this frame's staged batch as one write.
 	command_queue.launch([this, p_present, frame_step](RenderGrantToken &) {
 		MacrameRender::set_holds_grant(true);
 		_draw(p_present, frame_step);

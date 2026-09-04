@@ -41,12 +41,39 @@
 #include <thread>
 #endif
 
+#ifdef WINDOWS_ENABLED
+#include <windows.h>
+
+#include <cstdlib>
+#endif
+
+namespace {
+// Windows 11 on a hybrid CPU (P/E cores) schedules a process that is not the foreground window with
+// a "prefer efficient cores" policy: ETW context-switch data showed the draw task and even the main
+// thread spending most of their time on E-cores. Opting the process out of power throttling (EcoQoS)
+// asks for the high-QoS policy instead; this is a scheduling hint, not a pin (MACRAME_QOS=0 disables).
+void request_high_qos() {
+#ifdef WINDOWS_ENABLED
+	const char *env = std::getenv("MACRAME_QOS");
+	if (env && env[0] == '0') {
+		return;
+	}
+	PROCESS_POWER_THROTTLING_STATE state = {};
+	state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+	state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+	state.StateMask = 0; // Controlled and off: never throttle.
+	SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state));
+#endif
+}
+} // namespace
+
 void MacrameRuntime::init(int p_workers) {
 #ifdef MACRAME_ENABLED
 	ts::Scheduler_config cfg;
 	if (p_workers > 0) {
 		cfg.num_workers = p_workers;
 	}
+	request_high_qos();
 	ts::create_scheduler(cfg);
 	MacrameScene::init();
 	print_verbose(vformat("Macrame: scheduler up, %d workers.", get_worker_count()));
