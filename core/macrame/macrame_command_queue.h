@@ -38,6 +38,12 @@
 // ring, `sync()` applies the batch as one write, and `launch()` runs a body (the frame's
 // `_draw`) as an asynchronous write task that overlaps the next frame's simulation.
 //
+// Two journals, double buffered: `launch_pipelined()` enqueues the current journal's commit
+// as an async write on the object (FIFO behind the running task), enqueues the body behind
+// it, and switches staging to the other journal, so the main thread can run a whole frame
+// ahead of the renderer without waiting. At most one task is queued behind the running one;
+// a third launch joins the oldest first.
+//
 // The interface mirrors the subset of `CommandQueueMT` the `FUNC*` wrapper macros use, so
 // `rendering_server_default.h` needs no macro changes beyond the async condition.
 
@@ -56,21 +62,81 @@
 
 template <typename Token>
 class MacrameCommandQueue {
-	ts::Guarded<Token> guarded;
-	ts::Deferred<Token> staged;
-	ts::Recorder<Token> recorder; // The blue thread's recorder.
-	std::vector<ts::Recorder<Token>> shard_recorders; // One per scene shard: FIFO per producer, deterministic apply order.
-	ts::Task<void> in_flight;
-	bool has_in_flight = false;
-	bool (*holds_grant)() = nullptr;
-	std::atomic<uint64_t> staged_count{ 0 };
+	struct Journal {
+		ts::Deferred<Token> staged;
+		ts::Recorder<Token> recorder; // The blue thread's recorder.
+		std::vector<ts::Recorder<Token>> shard_recorders; // One per scene shard: FIFO per producer, deterministic apply order.
+		std::atomic<uint64_t> count{ 0 };
+		ts::Task<void> commit_task; // The enqueued commit of a pipelined launch; settled before the task launched after it runs.
+		bool has_commit_task = false;
 
-	void _wait_in_flight() {
-		if (has_in_flight) {
-			GodotProfileZone("MacrameCommandQueue: wait for in-flight draw");
-			in_flight.sync();
-			has_in_flight = false;
+		explicit Journal(ts::Guarded<Token> &p_guarded) :
+				staged(p_guarded), recorder(staged.recorder()) {
+			shard_recorders.reserve(MacrameScene::SHARD_COUNT);
+			for (int i = 0; i < MacrameScene::SHARD_COUNT; i++) {
+				shard_recorders.push_back(staged.recorder());
+			}
 		}
+	};
+
+	ts::Guarded<Token> guarded;
+	Journal journal_a;
+	Journal journal_b;
+	Journal *cur = &journal_a; // Where new commands are staged.
+	ts::Task<void> in_flight; // The oldest task on the object.
+	bool has_in_flight = false;
+	ts::Task<void> queued; // A younger task, FIFO behind `in_flight` (pipelined launches only).
+	bool has_queued = false;
+	bool (*holds_grant)() = nullptr;
+
+	void _settle_commits() {
+		for (Journal *j : { &journal_a, &journal_b }) {
+			if (j->has_commit_task) {
+				j->commit_task.sync(); // FIFO before the task launched after it, so already settled.
+				j->has_commit_task = false;
+			}
+		}
+	}
+
+	// Join everything on the object.
+	void _wait_in_flight() {
+		if (has_in_flight || has_queued) {
+			GodotProfileZone("MacrameCommandQueue: wait for in-flight draw");
+			if (has_in_flight) {
+				in_flight.sync();
+				has_in_flight = false;
+			}
+			if (has_queued) {
+				queued.sync();
+				has_queued = false;
+			}
+			_settle_commits();
+		}
+	}
+
+	// Leave at most one task on the object: join the oldest if a younger one is queued.
+	void _wait_oldest() {
+		if (has_queued) {
+			GodotProfileZone("MacrameCommandQueue: wait for oldest draw");
+			in_flight.sync();
+			in_flight = std::move(queued);
+			has_queued = false;
+		}
+	}
+
+	// This body holds the write grant: apply both journals inline (the one not being staged
+	// into first; a journal whose commit was enqueued is empty by now).
+	void _commit_inline() {
+		for (Journal *j : { cur == &journal_a ? &journal_b : &journal_a, cur }) {
+			if (j->count.load(std::memory_order_relaxed) != 0) {
+				(void)j->staged.commit();
+				j->count.store(0, std::memory_order_relaxed);
+			}
+		}
+	}
+
+	bool _has_staged() const {
+		return journal_a.count.load(std::memory_order_relaxed) != 0 || journal_b.count.load(std::memory_order_relaxed) != 0;
 	}
 
 public:
@@ -78,16 +144,12 @@ public:
 	// object's grant (the launched draw or step); it is the one caller allowed to touch the
 	// object directly while a task is in flight.
 	MacrameCommandQueue(const char *p_name, bool (*p_holds_grant)()) :
-			guarded(ts::Named{ p_name }), staged(guarded), recorder(staged.recorder()), holds_grant(p_holds_grant) {
-		shard_recorders.reserve(MacrameScene::SHARD_COUNT);
-		for (int i = 0; i < MacrameScene::SHARD_COUNT; i++) {
-			shard_recorders.push_back(staged.recorder());
-		}
-	}
+			guarded(ts::Named{ p_name }), journal_a(guarded), journal_b(guarded), holds_grant(p_holds_grant) {}
 
 	~MacrameCommandQueue() {
 		_wait_in_flight();
-		staged.discard();
+		journal_a.staged.discard();
+		journal_b.staged.discard();
 	}
 
 	MacrameCommandQueue(const MacrameCommandQueue &) = delete;
@@ -100,9 +162,10 @@ public:
 	template <typename T, typename M, typename... Args>
 	void push(T *p_instance, M p_method, Args... p_args) {
 		const int shard = MacrameScene::current_shard();
-		ts::Recorder<Token> &rec = shard < 0 ? recorder : shard_recorders[shard];
+		Journal &j = *cur;
+		ts::Recorder<Token> &rec = shard < 0 ? j.recorder : j.shard_recorders[shard];
 		rec.stage([=](Token &) { (p_instance->*p_method)(p_args...); });
-		staged_count.fetch_add(1, std::memory_order_relaxed);
+		j.count.fetch_add(1, std::memory_order_relaxed);
 	}
 
 	template <typename T, typename M, typename... Args>
@@ -126,7 +189,7 @@ public:
 		}
 		_wait_in_flight();
 		guarded.access([&](Token &) {
-			(void)staged.commit(); // Inline apply: this body holds the write grant.
+			_commit_inline();
 			*r_ret = (p_instance->*p_method)(p_args...);
 		}).sync();
 	}
@@ -134,7 +197,7 @@ public:
 	// Whether the caller may touch the object directly: it holds the grant, or it is a blue
 	// thread (not a worker) with no task in flight. Wrappers stage otherwise.
 	bool may_call_direct() const {
-		return holds_grant() || (ts::current_worker_index() < 0 && !has_in_flight && !MacrameScene::in_shard_task());
+		return holds_grant() || (ts::current_worker_index() < 0 && !has_in_flight && !has_queued && !MacrameScene::in_shard_task());
 	}
 
 	// Before a direct call from a blue thread: join the in-flight task and apply what was
@@ -144,7 +207,7 @@ public:
 		if (holds_grant() || MacrameScene::in_shard_task()) {
 			return; // Shards read the state that was current when the phase began.
 		}
-		if (has_in_flight || staged_count.load(std::memory_order_relaxed) != 0) {
+		if (has_in_flight || has_queued || _has_staged()) {
 			sync();
 		}
 	}
@@ -155,17 +218,16 @@ public:
 	void sync() {
 		GodotProfileZone("MacrameCommandQueue: sync + apply batch");
 		_wait_in_flight();
-		if (staged_count.load(std::memory_order_relaxed) == 0) {
+		if (!_has_staged()) {
 			return;
 		}
 		guarded.access([&](Token &) {
-			(void)staged.commit(); // Inline apply: this body holds the write grant.
+			_commit_inline();
 		}).sync();
-		staged_count.store(0, std::memory_order_relaxed);
 	}
 
 	// Run `p_body(Token&)` as an asynchronous write task holding the grant. The caller must
-	// have called `sync()` first (the frame loop does). Returns immediately.
+	// have called `sync()` first (the physics tick does). Returns immediately.
 	template <typename Fn>
 	void launch(Fn &&p_body, const char *p_name) {
 		_wait_in_flight();
@@ -173,11 +235,39 @@ public:
 		has_in_flight = true;
 	}
 
+	// Pipelined form: enqueue this frame's batch (the current journal) as an async write
+	// behind the running task, then `p_body` behind it, and stage the next frame into the
+	// other journal. Waits only if a task is already queued behind the running one, so the
+	// caller runs at most one frame ahead of the object.
+	template <typename Fn>
+	void launch_pipelined(Fn &&p_body, const char *p_name) {
+		_wait_oldest();
+		Journal &j = *cur;
+		if (j.has_commit_task) {
+			j.commit_task.sync(); // Two launches ago; settled long since.
+			j.has_commit_task = false;
+		}
+		if (j.count.load(std::memory_order_relaxed) != 0) {
+			j.commit_task = j.staged.commit(); // Enqueued: one write, cut when it runs, FIFO on the object.
+			j.has_commit_task = true;
+			j.count.store(0, std::memory_order_relaxed);
+		}
+		ts::Task<void> t = guarded.async(std::forward<Fn>(p_body), { .name = p_name });
+		if (has_in_flight) {
+			queued = std::move(t);
+			has_queued = true;
+		} else {
+			in_flight = std::move(t);
+			has_in_flight = true;
+		}
+		cur = (cur == &journal_a) ? &journal_b : &journal_a;
+	}
+
 	// Interface parity with CommandQueueMT for the pump-task branch that Macrame mode never takes.
 	template <typename TaskID>
 	void set_pump_task_id(TaskID) {}
 
-	bool is_in_flight() const { return has_in_flight; }
+	bool is_in_flight() const { return has_in_flight || has_queued; }
 	void wait() { _wait_in_flight(); }
 };
 

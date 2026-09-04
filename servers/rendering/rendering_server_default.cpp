@@ -494,9 +494,10 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 #ifdef MACRAME_ENABLED
 	// The draw runs as an asynchronous write task on the renderer and overlaps the next
 	// frame's simulation; the next sync() joins it. sync() has already applied the batch.
-	command_queue.sync(); // Join the previous draw and apply this frame's staged batch as one write.
-	MacrameRenderSnapshot::publish(); // The joined draw's outputs become the version the next frame reads.
-	command_queue.launch([this, p_present, frame_step](RenderGrantToken &) {
+	// Pipelined: this frame's batch and its draw queue behind the draw still running, and the
+	// main thread goes on to the next frame; it waits only when it is a whole frame ahead.
+	MacrameRenderSnapshot::publish(); // Outputs of the draws that completed become the version the next frame reads.
+	command_queue.launch_pipelined([this, p_present, frame_step](RenderGrantToken &) {
 		MacrameRender::set_holds_grant(true);
 		MacrameRuntime::long_task_begin();
 		_draw(p_present, frame_step);
