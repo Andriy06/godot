@@ -33,11 +33,25 @@
 #include "core/object/worker_thread_pool.h"
 #include "core/os/thread.h"
 #include "core/templates/command_queue_mt.h"
+#ifdef MACRAME_ENABLED
+#include "core/macrame/macrame_command_queue.h"
+#include "core/macrame/macrame_render_grant.h"
+#endif
 #include "servers/physics_3d/physics_server_3d.h"
 
+#ifdef MACRAME_ENABLED
+// Direct when the caller holds the space's grant (the step task) or is a blue thread with
+// nothing in flight; staged otherwise. Queries below join the in-flight step first.
+#define ASYNC_COND_PUSH (!command_queue.may_call_direct())
+#define ASYNC_COND_PUSH_AND_RET (!command_queue.may_call_direct())
+#define ASYNC_COND_PUSH_AND_SYNC (!command_queue.may_call_direct())
+#define PS_DIRECT_QUERY_GUARD(m_ret) command_queue.flush_if_pending()
+#else
 #define ASYNC_COND_PUSH (Thread::get_caller_id() != server_thread && !(doing_sync.is_set() && Thread::is_main_thread()))
 #define ASYNC_COND_PUSH_AND_RET (Thread::get_caller_id() != server_thread && !(doing_sync.is_set() && Thread::is_main_thread()))
 #define ASYNC_COND_PUSH_AND_SYNC (Thread::get_caller_id() != server_thread && !(doing_sync.is_set() && Thread::is_main_thread()))
+#define PS_DIRECT_QUERY_GUARD(m_ret) PS_DIRECT_QUERY_GUARD(m_ret)
+#endif
 
 #ifdef DEBUG_SYNC
 #define SYNC_DEBUG print_line("sync on: " + String(__FUNCTION__));
@@ -65,7 +79,11 @@ class PhysicsServer3DWrapMT : public PhysicsServer3D {
 
 	mutable PhysicsServer3D *physics_server_3d = nullptr;
 
+#ifdef MACRAME_ENABLED
+	mutable MacrameCommandQueue<PhysicsGrantToken> command_queue{ "physics_space", &MacramePhysics::holds_grant };
+#else
 	mutable CommandQueueMT command_queue;
+#endif
 
 	Thread::ID server_thread = Thread::UNASSIGNED_ID;
 	WorkerThreadPool::TaskID server_task_id = WorkerThreadPool::INVALID_TASK_ID;
@@ -104,7 +122,7 @@ public:
 #if 0
 	//these work well, but should be used from the main thread only
 	bool shape_collide(RID p_shape_A, const Transform &p_xform_A, const Vector3 &p_motion_A, RID p_shape_B, const Transform &p_xform_B, const Vector3 &p_motion_B, Vector3 *r_results, int p_result_max, int &r_result_count) {
-		ERR_FAIL_COND_V(!Thread::is_main_thread(), false);
+		PS_DIRECT_QUERY_GUARD(false);
 		return physics_server_3d->shape_collide(p_shape_A, p_xform_A, p_motion_A, p_shape_B, p_xform_B, p_motion_B, r_results, p_result_max, r_result_count);
 	}
 #endif
@@ -119,18 +137,18 @@ public:
 
 	// this function only works on physics process, errors and returns null otherwise
 	PhysicsDirectSpaceState3D *space_get_direct_state(RID p_space) override {
-		ERR_FAIL_COND_V(!Thread::is_main_thread(), nullptr);
+		PS_DIRECT_QUERY_GUARD(nullptr);
 		return physics_server_3d->space_get_direct_state(p_space);
 	}
 
 	FUNC2(space_set_debug_contacts, RID, int);
 	virtual Vector<Vector3> space_get_contacts(RID p_space) const override {
-		ERR_FAIL_COND_V(!Thread::is_main_thread(), Vector<Vector3>());
+		PS_DIRECT_QUERY_GUARD(Vector<Vector3>());
 		return physics_server_3d->space_get_contacts(p_space);
 	}
 
 	virtual int space_get_contact_count(RID p_space) const override {
-		ERR_FAIL_COND_V(!Thread::is_main_thread(), 0);
+		PS_DIRECT_QUERY_GUARD(0);
 		return physics_server_3d->space_get_contact_count(p_space);
 	}
 
@@ -271,13 +289,13 @@ public:
 	FUNC2(body_set_ray_pickable, RID, bool);
 
 	bool body_test_motion(RID p_body, const PS3DT::MotionParameters &p_parameters, PS3DT::MotionResult *r_result = nullptr) override {
-		ERR_FAIL_COND_V(!Thread::is_main_thread(), false);
+		PS_DIRECT_QUERY_GUARD(false);
 		return physics_server_3d->body_test_motion(p_body, p_parameters, r_result);
 	}
 
 	// this function only works on physics process, errors and returns null otherwise
 	PhysicsDirectBodyState3D *body_get_direct_state(RID p_body) override {
-		ERR_FAIL_COND_V(!Thread::is_main_thread(), nullptr);
+		PS_DIRECT_QUERY_GUARD(nullptr);
 		return physics_server_3d->body_get_direct_state(p_body);
 	}
 

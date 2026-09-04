@@ -58,6 +58,16 @@ void PhysicsServer3DWrapMT::_thread_sync() {
 /* EVENT QUEUING */
 
 void PhysicsServer3DWrapMT::step(real_t p_step) {
+#ifdef MACRAME_ENABLED
+	// The step is an asynchronous write task on the space; it overlaps the idle process and
+	// the render, and the next sync() joins it.
+	command_queue.launch([this, p_step](PhysicsGrantToken &) {
+		MacramePhysics::set_holds_grant(true);
+		physics_server_3d->step(p_step);
+		MacramePhysics::set_holds_grant(false);
+	}, "physics step");
+	return;
+#endif
 	if (create_thread) {
 		command_queue.push(physics_server_3d, &PhysicsServer3D::step, p_step);
 	} else {
@@ -66,6 +76,11 @@ void PhysicsServer3DWrapMT::step(real_t p_step) {
 }
 
 void PhysicsServer3DWrapMT::sync() {
+#ifdef MACRAME_ENABLED
+	command_queue.sync(); // Join the step, apply the staged writes.
+	physics_server_3d->sync();
+	return;
+#endif
 	if (create_thread) {
 		command_queue.push_and_sync(this, &PhysicsServer3DWrapMT::_thread_sync);
 	} else {
@@ -87,6 +102,11 @@ void PhysicsServer3DWrapMT::end_sync() {
 }
 
 void PhysicsServer3DWrapMT::init() {
+#ifdef MACRAME_ENABLED
+	server_thread = Thread::MAIN_ID;
+	physics_server_3d->init();
+	return;
+#endif
 	if (create_thread) {
 		WorkerThreadPool::TaskID tid = WorkerThreadPool::get_singleton()->add_task(callable_mp(this, &PhysicsServer3DWrapMT::_thread_loop), true, "Physics server 3D pump task", true);
 		command_queue.set_pump_task_id(tid);
@@ -100,6 +120,11 @@ void PhysicsServer3DWrapMT::init() {
 }
 
 void PhysicsServer3DWrapMT::finish() {
+#ifdef MACRAME_ENABLED
+	command_queue.sync();
+	physics_server_3d->finish();
+	return;
+#endif
 	if (create_thread) {
 		command_queue.push(physics_server_3d, &PhysicsServer3D::finish);
 		command_queue.push(this, &PhysicsServer3DWrapMT::_thread_exit);

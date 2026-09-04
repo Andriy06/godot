@@ -48,3 +48,12 @@ namespace MacrameRender {
 bool holds_grant();
 void set_holds_grant(bool p_holds);
 } // namespace MacrameRender
+
+struct PhysicsGrantToken {
+	int unused = 0;
+};
+
+namespace MacramePhysics {
+bool holds_grant();
+void set_holds_grant(bool p_holds);
+} // namespace MacramePhysics

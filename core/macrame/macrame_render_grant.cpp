@@ -38,7 +38,16 @@
 
 namespace {
 thread_local bool holds_render_grant = false;
+thread_local bool holds_physics_grant = false;
 } // namespace
+
+MACRAME_NO_INLINE bool MacramePhysics::holds_grant() {
+	return holds_physics_grant;
+}
+
+MACRAME_NO_INLINE void MacramePhysics::set_holds_grant(bool p_holds) {
+	holds_physics_grant = p_holds;
+}
 
 MACRAME_NO_INLINE bool MacrameRender::holds_grant() {
 	return holds_render_grant;

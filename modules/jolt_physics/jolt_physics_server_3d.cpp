@@ -1656,6 +1656,13 @@ void JoltPhysicsServer3D::step(real_t p_step) {
 
 void JoltPhysicsServer3D::sync() {
 	doing_sync = true;
+#ifdef MACRAME_ENABLED
+	// Add pending bodies here, once, instead of lazily inside every query: queries must be
+	// pure reads of the space so they can run concurrently under read grants.
+	for (JoltSpace3D *space : active_spaces) {
+		space->flush_pending_objects();
+	}
+#endif
 }
 
 void JoltPhysicsServer3D::end_sync() {

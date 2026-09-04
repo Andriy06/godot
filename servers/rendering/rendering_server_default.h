@@ -83,7 +83,7 @@ class RenderingServerDefault : public RenderingServer {
 
 #ifdef MACRAME_ENABLED
 	// Phase 1: staged commands into one guarded renderer; the draw is an async write task.
-	mutable MacrameCommandQueue<RenderGrantToken> command_queue{ "renderer" };
+	mutable MacrameCommandQueue<RenderGrantToken> command_queue{ "renderer", &MacrameRender::holds_grant };
 #else
 	mutable CommandQueueMT command_queue;
 #endif
@@ -124,7 +124,7 @@ public:
 
 #define WRITE_ACTION redraw_request();
 #ifdef MACRAME_ENABLED
-#define RS_ON_SERVER_THREAD (MacrameRender::holds_grant())
+#define RS_ON_SERVER_THREAD (command_queue.may_call_direct())
 #else
 #define RS_ON_SERVER_THREAD (RS_ON_SERVER_THREAD)
 #endif

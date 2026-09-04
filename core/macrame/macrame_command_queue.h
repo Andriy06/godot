@@ -44,6 +44,7 @@
 #include "ts/deferred.h"
 #include "ts/guarded.h"
 #include "ts/recorder.h"
+#include "ts/scheduler.h"
 #include "ts/task.h"
 
 #include "core/profiling/profiling.h"
@@ -57,6 +58,8 @@ class MacrameCommandQueue {
 	ts::Recorder<Token> recorder;
 	ts::Task<void> in_flight;
 	bool has_in_flight = false;
+	bool (*holds_grant)() = nullptr;
+	uint64_t staged_count = 0;
 
 	void _wait_in_flight() {
 		if (has_in_flight) {
@@ -67,8 +70,11 @@ class MacrameCommandQueue {
 	}
 
 public:
-	explicit MacrameCommandQueue(const char *p_name) :
-			guarded(ts::Named{ p_name }), staged(guarded), recorder(staged.recorder()) {}
+	// `p_holds_grant` reports whether the calling thread is running the body that holds the
+	// object's grant (the launched draw or step); it is the one caller allowed to touch the
+	// object directly while a task is in flight.
+	MacrameCommandQueue(const char *p_name, bool (*p_holds_grant)()) :
+			guarded(ts::Named{ p_name }), staged(guarded), recorder(staged.recorder()), holds_grant(p_holds_grant) {}
 
 	~MacrameCommandQueue() {
 		_wait_in_flight();
@@ -85,6 +91,7 @@ public:
 	template <typename T, typename M, typename... Args>
 	void push(T *p_instance, M p_method, Args... p_args) {
 		recorder.stage([=](Token &) { (p_instance->*p_method)(p_args...); });
+		staged_count++;
 	}
 
 	template <typename T, typename M, typename... Args>
@@ -106,9 +113,23 @@ public:
 		}).sync();
 	}
 
-	// The direct branch of the wrappers only runs under the grant, where nothing is pending
-	// by construction (the batch was applied before the grant was handed out).
-	void flush_if_pending() {}
+	// Whether the caller may touch the object directly: it holds the grant, or it is a blue
+	// thread (not a worker) with no task in flight. Wrappers stage otherwise.
+	bool may_call_direct() const {
+		return holds_grant() || (ts::current_worker_index() < 0 && !has_in_flight);
+	}
+
+	// Before a direct call from a blue thread: join the in-flight task and apply what was
+	// staged, so the direct call observes every earlier command in order. Under the grant
+	// this is a no-op (the batch was applied before the grant was handed out).
+	void flush_if_pending() {
+		if (holds_grant()) {
+			return;
+		}
+		if (has_in_flight || staged_count != 0) {
+			sync();
+		}
+	}
 
 	// Apply every staged command as one write on the calling thread.
 	void flush_all() { sync(); }
@@ -116,9 +137,13 @@ public:
 	void sync() {
 		GodotProfileZone("MacrameCommandQueue: sync + apply batch");
 		_wait_in_flight();
+		if (staged_count == 0) {
+			return;
+		}
 		guarded.access([&](Token &) {
 			(void)staged.commit(); // Inline apply: this body holds the write grant.
 		}).sync();
+		staged_count = 0;
 	}
 
 	// Run `p_body(Token&)` as an asynchronous write task holding the grant. The caller must
