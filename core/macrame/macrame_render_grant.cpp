@@ -49,6 +49,18 @@ MACRAME_NO_INLINE void MacramePhysics::set_holds_grant(bool p_holds) {
 	holds_physics_grant = p_holds;
 }
 
+namespace {
+ts::Guarded<PhysicsGrantToken> *physics_guarded = nullptr;
+} // namespace
+
+void MacramePhysics::set_guarded(ts::Guarded<PhysicsGrantToken> *p_guarded) {
+	physics_guarded = p_guarded;
+}
+
+ts::Guarded<PhysicsGrantToken> *MacramePhysics::get_guarded() {
+	return physics_guarded;
+}
+
 MACRAME_NO_INLINE bool MacrameRender::holds_grant() {
 	return holds_render_grant;
 }

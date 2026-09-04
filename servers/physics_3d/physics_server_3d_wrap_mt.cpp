@@ -139,6 +139,9 @@ void PhysicsServer3DWrapMT::finish() {
 }
 
 PhysicsServer3DWrapMT::PhysicsServer3DWrapMT(PhysicsServer3D *p_contained, bool p_create_thread) {
+#ifdef MACRAME_ENABLED
+	MacramePhysics::set_guarded(&command_queue.get_guarded());
+#endif
 	physics_server_3d = p_contained;
 	create_thread = p_create_thread;
 }

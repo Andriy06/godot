@@ -30,6 +30,11 @@
 
 #pragma once
 
+namespace ts {
+template <typename T>
+class Guarded;
+}
+
 // Phase 1 of the Macrame conversion: the render server's state is one guarded object and the
 // frame's draw runs as a write task on a worker. The wrapper macros in
 // `rendering_server_default.h` need a cheap "am I running under that grant?" test to choose
@@ -56,4 +61,7 @@ struct PhysicsGrantToken {
 namespace MacramePhysics {
 bool holds_grant();
 void set_holds_grant(bool p_holds);
+// The physics wrapper registers its guarded space here so scene shards can declare a read on it.
+void set_guarded(ts::Guarded<PhysicsGrantToken> *p_guarded);
+ts::Guarded<PhysicsGrantToken> *get_guarded();
 } // namespace MacramePhysics

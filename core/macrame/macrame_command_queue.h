@@ -47,19 +47,23 @@
 #include "ts/scheduler.h"
 #include "ts/task.h"
 
+#include "core/macrame/macrame_scene.h"
 #include "core/profiling/profiling.h"
 
+#include <atomic>
 #include <utility>
+#include <vector>
 
 template <typename Token>
 class MacrameCommandQueue {
 	ts::Guarded<Token> guarded;
 	ts::Deferred<Token> staged;
-	ts::Recorder<Token> recorder;
+	ts::Recorder<Token> recorder; // The blue thread's recorder.
+	std::vector<ts::Recorder<Token>> shard_recorders; // One per scene shard: FIFO per producer, deterministic apply order.
 	ts::Task<void> in_flight;
 	bool has_in_flight = false;
 	bool (*holds_grant)() = nullptr;
-	uint64_t staged_count = 0;
+	std::atomic<uint64_t> staged_count{ 0 };
 
 	void _wait_in_flight() {
 		if (has_in_flight) {
@@ -74,7 +78,12 @@ public:
 	// object's grant (the launched draw or step); it is the one caller allowed to touch the
 	// object directly while a task is in flight.
 	MacrameCommandQueue(const char *p_name, bool (*p_holds_grant)()) :
-			guarded(ts::Named{ p_name }), staged(guarded), recorder(staged.recorder()), holds_grant(p_holds_grant) {}
+			guarded(ts::Named{ p_name }), staged(guarded), recorder(staged.recorder()), holds_grant(p_holds_grant) {
+		shard_recorders.reserve(MacrameScene::SHARD_COUNT);
+		for (int i = 0; i < MacrameScene::SHARD_COUNT; i++) {
+			shard_recorders.push_back(staged.recorder());
+		}
+	}
 
 	~MacrameCommandQueue() {
 		_wait_in_flight();
@@ -90,8 +99,10 @@ public:
 	// `CommandQueueMT` does, so RIDs, Variants and containers are safe to hand over.
 	template <typename T, typename M, typename... Args>
 	void push(T *p_instance, M p_method, Args... p_args) {
-		recorder.stage([=](Token &) { (p_instance->*p_method)(p_args...); });
-		staged_count++;
+		const int shard = MacrameScene::current_shard();
+		ts::Recorder<Token> &rec = shard < 0 ? recorder : shard_recorders[shard];
+		rec.stage([=](Token &) { (p_instance->*p_method)(p_args...); });
+		staged_count.fetch_add(1, std::memory_order_relaxed);
 	}
 
 	template <typename T, typename M, typename... Args>
@@ -106,6 +117,13 @@ public:
 	template <typename T, typename M, typename R, typename... Args>
 	void push_and_ret(T *p_instance, M p_method, R *r_ret, Args... p_args) {
 		GodotProfileZone("MacrameCommandQueue: synchronous getter");
+		if (MacrameScene::in_shard_task()) {
+			// A synchronous server getter from a shard would need the server's write grant while
+			// the shard holds a read grant on it (or none): a certain deadlock, and a design smell.
+			// Read published state instead. Report and return the default.
+			ERR_PRINT_ONCE("Macrame: synchronous server getter called from a scene shard; returning a default value. Read published state instead.");
+			return;
+		}
 		_wait_in_flight();
 		guarded.access([&](Token &) {
 			(void)staged.commit(); // Inline apply: this body holds the write grant.
@@ -116,17 +134,17 @@ public:
 	// Whether the caller may touch the object directly: it holds the grant, or it is a blue
 	// thread (not a worker) with no task in flight. Wrappers stage otherwise.
 	bool may_call_direct() const {
-		return holds_grant() || (ts::current_worker_index() < 0 && !has_in_flight);
+		return holds_grant() || (ts::current_worker_index() < 0 && !has_in_flight && !MacrameScene::in_shard_task());
 	}
 
 	// Before a direct call from a blue thread: join the in-flight task and apply what was
 	// staged, so the direct call observes every earlier command in order. Under the grant
 	// this is a no-op (the batch was applied before the grant was handed out).
 	void flush_if_pending() {
-		if (holds_grant()) {
-			return;
+		if (holds_grant() || MacrameScene::in_shard_task()) {
+			return; // Shards read the state that was current when the phase began.
 		}
-		if (has_in_flight || staged_count != 0) {
+		if (has_in_flight || staged_count.load(std::memory_order_relaxed) != 0) {
 			sync();
 		}
 	}
@@ -137,13 +155,13 @@ public:
 	void sync() {
 		GodotProfileZone("MacrameCommandQueue: sync + apply batch");
 		_wait_in_flight();
-		if (staged_count == 0) {
+		if (staged_count.load(std::memory_order_relaxed) == 0) {
 			return;
 		}
 		guarded.access([&](Token &) {
 			(void)staged.commit(); // Inline apply: this body holds the write grant.
 		}).sync();
-		staged_count = 0;
+		staged_count.store(0, std::memory_order_relaxed);
 	}
 
 	// Run `p_body(Token&)` as an asynchronous write task holding the grant. The caller must

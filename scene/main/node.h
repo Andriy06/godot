@@ -35,6 +35,9 @@
 #include "core/object/object.h"
 #include "core/object/ref_counted.h"
 #include "core/os/thread_safe.h"
+#ifdef MACRAME_ENABLED
+#include "core/macrame/macrame_scene.h"
+#endif
 #include "core/templates/iterable.h"
 #include "scene/scene_string_names.h" // IWYU pragma: export. Make available to all Nodes.
 
@@ -934,7 +937,17 @@ Error Node::rpc_id(int p_peer_id, const StringName &p_method, VarArgs... p_args)
 	return rpcp(p_peer_id, p_method, sizeof...(p_args) == 0 ? nullptr : (const Variant **)argptrs, sizeof...(p_args));
 }
 
-#ifdef DEBUG_ENABLED
+#ifdef MACRAME_ENABLED
+// The Macrame harness: inside a shard task, a write needs the write grant on the node's
+// shard, a read needs a read grant, and a main-thread-only method needs the main shard's
+// write grant, which a shard never holds. Outside shard tasks the checks are skipped.
+#define ERR_THREAD_GUARD MacrameScene::check_write(this);
+#define ERR_THREAD_GUARD_V(m_ret) MacrameScene::check_write(this);
+#define ERR_MAIN_THREAD_GUARD MacrameScene::check_main(this);
+#define ERR_MAIN_THREAD_GUARD_V(m_ret) MacrameScene::check_main(this);
+#define ERR_READ_THREAD_GUARD MacrameScene::check_read(this);
+#define ERR_READ_THREAD_GUARD_V(m_ret) MacrameScene::check_read(this);
+#elif defined(DEBUG_ENABLED)
 #define ERR_THREAD_GUARD ERR_FAIL_COND_MSG(!is_accessible_from_caller_thread(), vformat("%s: The caller thread can't call the function `%s()` on this node. Use `call_deferred()` or `call_deferred_thread_group()` instead.", get_description(), FUNCTION_STR));
 #define ERR_THREAD_GUARD_V(m_ret) ERR_FAIL_COND_V_MSG(!is_accessible_from_caller_thread(), (m_ret), vformat("%s: The caller thread can't call the function `%s()` on this node. Use `call_deferred()` or `call_deferred_thread_group()` instead.", get_description(), FUNCTION_STR));
 #define ERR_MAIN_THREAD_GUARD ERR_FAIL_COND_MSG(is_inside_tree() && !is_current_thread_safe_for_nodes(), vformat("%s: The function `%s()` on this node can only be accessed from the main thread. Use `call_deferred()` instead.", get_description(), FUNCTION_STR));

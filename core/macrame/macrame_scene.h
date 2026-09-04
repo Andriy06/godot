@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  macrame_runtime.cpp                                                   */
+/*  macrame_scene.h                                                       */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,55 +28,51 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#include "macrame_runtime.h"
+#pragma once
 
-#include "core/macrame/macrame_scene.h"
+// Phase 2b of the Macrame conversion: scene shards.
+//
+// The scene tree is cut into a fixed number of shards. Every process group that a node
+// opts into with `process_thread_group = SUB_THREAD` is assigned to one shard (round
+// robin); everything else belongs to the main shard, which only the blue thread runs.
+// A shard is one `Guarded` object. Processing a shard is one task with a write grant on
+// that shard and read grants on the main shard and on the physics space, so shards run
+// in parallel with no locks: by declaration they cannot touch each other's nodes.
+//
+// The harness sits at the node guard macros (`scene/main/node.h`): inside a shard task a
+// node write checks the write grant on the node's shard, a node read checks a read grant,
+// and a main-thread-only method checks a write grant on the main shard, which a shard
+// never holds. Outside shard tasks (the blue thread, single-threaded by construction)
+// the checks are skipped. Cross-shard writes go through the existing deferred paths
+// (`call_deferred_thread_group`, `set_deferred_thread_group`); cross-shard reads fault.
 
-#include "core/string/print_string.h"
-#include "core/variant/variant.h"
+class Node;
+class SceneTree;
 
-#ifdef MACRAME_ENABLED
-#include "ts/scheduler.h"
+struct SceneShardToken {
+	int index = -1; // -1 is the main shard.
+};
 
-#include <thread>
-#endif
+namespace MacrameScene {
+constexpr int SHARD_COUNT = 16;
 
-void MacrameRuntime::init(int p_workers) {
-#ifdef MACRAME_ENABLED
-	ts::Scheduler_config cfg;
-	if (p_workers > 0) {
-		cfg.num_workers = p_workers;
-	}
-	ts::create_scheduler(cfg);
-	MacrameScene::init();
-	print_verbose(vformat("Macrame: scheduler up, %d workers.", get_worker_count()));
-#else
-	(void)p_workers;
-#endif
-}
+void init();
+void finish();
+bool is_enabled();
 
-void MacrameRuntime::finish() {
-#ifdef MACRAME_ENABLED
-	MacrameScene::finish();
-	if (ts::scheduler_running()) {
-		ts::destroy_scheduler();
-	}
-#endif
-}
+// Round-robin shard assignment for a new sub-thread process group.
+int assign_shard();
 
-bool MacrameRuntime::is_enabled() {
-#ifdef MACRAME_ENABLED
-	return ts::scheduler_running();
-#else
-	return false;
-#endif
-}
+// Thread-local task context (out-of-line accessors, see macrame_render_grant.h).
+int current_shard(); // -1 when not inside a shard task.
+bool in_shard_task();
 
-int MacrameRuntime::get_worker_count() {
-#ifdef MACRAME_ENABLED
-	const uint32_t n = ts::current_scheduler_config().num_workers;
-	return (int)(n == 0 ? std::thread::hardware_concurrency() : n);
-#else
-	return 0;
-#endif
-}
+// Harness entry points used by the node guard macros.
+void check_write(const Node *p_node);
+void check_read(const Node *p_node);
+void check_main(const Node *p_node);
+
+// Run every group in `p_groups` (a null-terminated array is not used; count given) as
+// shard tasks and join them. Called from SceneTree::_process for a threaded batch.
+void run_groups(SceneTree *p_tree, void **p_groups, int p_group_count, bool p_physics);
+} // namespace MacrameScene

@@ -1183,6 +1183,11 @@ bool SceneTree::is_suspended() const {
 }
 
 void SceneTree::_process_group(ProcessGroup *p_group, bool p_physics) {
+#ifdef MACRAME_ENABLED
+	if (MacrameScene::in_shard_task()) {
+		Node::current_process_thread_group = p_group->owner;
+	}
+#endif
 	// When reading this function, keep in mind that this code must work in a way where
 	// if any node is removed, this needs to continue working.
 
@@ -1241,6 +1246,14 @@ void SceneTree::_process_group(ProcessGroup *p_group, bool p_physics) {
 	}
 
 	p_group->call_queue.flush(); // Flush messages also after processing (for potential deferred calls).
+}
+
+int SceneTree::macrame_shard_of(const Node *p_node) {
+	const Node *owner = p_node->data.process_thread_group_owner;
+	if (!owner || !owner->data.process_group) {
+		return -1;
+	}
+	return ((ProcessGroup *)owner->data.process_group)->macrame_shard;
 }
 
 void SceneTree::_process_groups_thread(uint32_t p_index, bool p_physics) {
@@ -1319,8 +1332,12 @@ void SceneTree::_process(bool p_physics) {
 				}
 
 				if (using_threads) {
+#ifdef MACRAME_ENABLED
+					MacrameScene::run_groups(this, (void **)local_process_group_cache.ptr(), local_process_group_cache.size(), p_physics);
+#else
 					WorkerThreadPool::GroupID id = WorkerThreadPool::get_singleton()->add_template_group_task(this, &SceneTree::_process_groups_thread, p_physics, local_process_group_cache.size(), -1, true);
 					WorkerThreadPool::get_singleton()->wait_for_group_task_completion(id);
+#endif
 				}
 			}
 
@@ -1399,6 +1416,9 @@ void SceneTree::_add_process_group(Node *p_node) {
 	ProcessGroup *pg = memnew(ProcessGroup);
 
 	pg->owner = p_node;
+#ifdef MACRAME_ENABLED
+	pg->macrame_shard = MacrameScene::assign_shard();
+#endif
 	p_node->data.process_group = pg;
 
 	process_groups.push_back(pg);
