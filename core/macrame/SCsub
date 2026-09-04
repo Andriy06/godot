@@ -23,3 +23,10 @@ if env["macrame_path"]:
     env_macrame.Prepend(CPPPATH=[str(macrame_root / "tools")])
     for name in ["access", "fatal", "guarded", "scheduler", "static_task_graph", "worker_thread"]:
         env_macrame.add_source_files(env.core_sources, str(macrame_root / "src" / f"{name}.cpp"))
+
+    # Optional per-thread allocator experiment (rpmalloc, MIT) from an external checkout.
+    if env["macrame_rpmalloc_path"]:
+        rp = pathlib.Path(env["macrame_rpmalloc_path"]).absolute()
+        env_rp = env.Clone()
+        env_rp.disable_warnings()
+        env_rp.add_source_files(env.core_sources, str(rp / "rpmalloc.c"))

@@ -217,6 +217,7 @@ opts.Add(
     )
 )
 opts.Add(("profiler_path", "Path to the Profiler framework.", ""))
+opts.Add(("macrame_rpmalloc_path", "Path to an rpmalloc checkout (rpmalloc.c/.h); routes the engine allocator through it (experiment).", ""))
 opts.Add(("macrame_path", "Path to a Macrame task-system checkout; enables the Macrame conversion (builds the tree as C++23).", ""))
 opts.Add(
     BoolVariable(
@@ -933,6 +934,9 @@ if env["macrame_path"]:
     env.Prepend(CPPPATH=[str(_macrame_root / "include")])
     # These are ODR-load-bearing in Macrame (detect_mismatch); keep them identical in every TU.
     env.Append(CPPDEFINES=["MACRAME_ENABLED", ("TS_SAFETY_CHECKS", 1), ("TS_PROFILING", 1)])
+    if env["macrame_rpmalloc_path"]:
+        env.Prepend(CPPPATH=[str(_pl.Path(env["macrame_rpmalloc_path"]).absolute())])
+        env.Append(CPPDEFINES=["MACRAME_RPMALLOC"])
 
 # Disable exception handling. Godot doesn't use exceptions anywhere, and this
 # saves around 20% of binary size and very significant build time (GH-80513).

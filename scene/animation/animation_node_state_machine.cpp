@@ -31,6 +31,7 @@
 #include "animation_node_state_machine.h"
 
 #include "core/config/engine.h"
+#include "core/profiling/profiling.h"
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 
@@ -719,6 +720,7 @@ AnimationNode::NodeTimeInfo AnimationNodeStateMachinePlayback::process(Animation
 }
 
 AnimationNode::NodeTimeInfo AnimationNodeStateMachinePlayback::_process(AnimationNode::ProcessState &p_process_state, AnimationNodeInstance &p_instance, AnimationNodeStateMachine *p_state_machine, const AnimationMixer::PlaybackInfo p_playback_info, bool p_test_only) {
+	GodotProfileZone("sm: playback _process");
 	AnimationTree *tree = p_process_state.tree;
 
 	double p_time = p_playback_info.time;
@@ -1073,6 +1075,7 @@ Ref<AnimationNodeStateMachineTransition> AnimationNodeStateMachinePlayback::_che
 }
 
 AnimationNodeStateMachinePlayback::NextInfo AnimationNodeStateMachinePlayback::_find_next(AnimationNode::ProcessState &p_process_state, AnimationNodeInstance &p_instance, AnimationTree *p_tree, AnimationNodeStateMachine *p_state_machine) const {
+	GodotProfileZone("sm: _find_next");
 	NextInfo next;
 	if (path.size()) {
 		for (int i = 0; i < p_state_machine->transitions.size(); i++) {
@@ -1647,6 +1650,7 @@ Vector2 AnimationNodeStateMachine::get_graph_offset() const {
 }
 
 AnimationNode::NodeTimeInfo AnimationNodeStateMachine::_process(ProcessState &p_process_state, AnimationNodeInstance &p_instance, const AnimationMixer::PlaybackInfo &p_playback_info, bool p_test_only) {
+	GodotProfileZone("sm: node _process");
 	Ref<AnimationNodeStateMachinePlayback> playback_new = p_instance.get_parameter(playback);
 	ERR_FAIL_COND_V(playback_new.is_null(), AnimationNode::NodeTimeInfo());
 

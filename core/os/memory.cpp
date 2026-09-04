@@ -39,6 +39,22 @@
 
 #include <cstdlib>
 
+#ifdef MACRAME_RPMALLOC
+// Experiment: a per-thread allocator behind the engine's allocator, to price heap contention
+// once entities are processed on many threads (Godot allocates constantly: Variants, strings,
+// vectors, queue pages). rpmalloc initializes per-thread heaps lazily.
+#include "rpmalloc.h"
+#define GODOT_MALLOC(m_size) rpmalloc(m_size)
+#define GODOT_CALLOC(m_n, m_size) rpcalloc(m_n, m_size)
+#define GODOT_REALLOC(m_ptr, m_size) rprealloc(m_ptr, m_size)
+#define GODOT_FREE(m_ptr) rpfree(m_ptr)
+#else
+#define GODOT_MALLOC(m_size) malloc(m_size)
+#define GODOT_CALLOC(m_n, m_size) calloc(m_n, m_size)
+#define GODOT_REALLOC(m_ptr, m_size) realloc(m_ptr, m_size)
+#define GODOT_FREE(m_ptr) free(m_ptr)
+#endif
+
 #ifdef DEBUG_ENABLED
 static SafeNumeric<uint64_t> _current_mem_usage;
 static SafeNumeric<uint64_t> _max_mem_usage;
@@ -83,7 +99,7 @@ void Memory::free_aligned_static(void *p_memory) {
 	uint32_t offset = *((uint32_t *)p_memory - 1);
 	void *p = (void *)((uint8_t *)p_memory - offset);
 	GodotProfileFree(p);
-	free(p);
+	GODOT_FREE(p);
 }
 
 template <bool p_ensure_zero>
@@ -96,9 +112,9 @@ void *Memory::alloc_static(size_t p_bytes, bool p_pad_align) {
 
 	void *mem;
 	if constexpr (p_ensure_zero) {
-		mem = calloc(1, p_bytes + (prepad ? DATA_OFFSET : 0));
+		mem = GODOT_CALLOC(1, p_bytes + (prepad ? DATA_OFFSET : 0));
 	} else {
-		mem = malloc(p_bytes + (prepad ? DATA_OFFSET : 0));
+		mem = GODOT_MALLOC(p_bytes + (prepad ? DATA_OFFSET : 0));
 	}
 
 	ERR_FAIL_NULL_V(mem, nullptr);
@@ -151,13 +167,13 @@ void *Memory::realloc_static(void *p_memory, size_t p_bytes, bool p_pad_align) {
 
 		if (p_bytes == 0) {
 			GodotProfileFree(mem);
-			free(mem);
+			GODOT_FREE(mem);
 			return nullptr;
 		} else {
 			*s = p_bytes;
 
 			GodotProfileFree(mem);
-			mem = (uint8_t *)realloc(mem, p_bytes + DATA_OFFSET);
+			mem = (uint8_t *)GODOT_REALLOC(mem, p_bytes + DATA_OFFSET);
 			ERR_FAIL_NULL_V(mem, nullptr);
 			GodotProfileAlloc(mem, p_bytes + DATA_OFFSET);
 
@@ -169,7 +185,7 @@ void *Memory::realloc_static(void *p_memory, size_t p_bytes, bool p_pad_align) {
 		}
 	} else {
 		GodotProfileFree(mem);
-		mem = (uint8_t *)realloc(mem, p_bytes);
+		mem = (uint8_t *)GODOT_REALLOC(mem, p_bytes);
 
 		ERR_FAIL_COND_V(mem == nullptr && p_bytes > 0, nullptr);
 		GodotProfileAlloc(mem, p_bytes);
@@ -198,10 +214,10 @@ void Memory::free_static(void *p_ptr, bool p_pad_align) {
 #endif
 
 		GodotProfileFree(mem);
-		free(mem);
+		GODOT_FREE(mem);
 	} else {
 		GodotProfileFree(mem);
-		free(mem);
+		GODOT_FREE(mem);
 	}
 }
 

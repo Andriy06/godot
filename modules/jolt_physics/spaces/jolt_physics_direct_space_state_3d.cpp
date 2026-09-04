@@ -32,6 +32,7 @@
 
 #include "../jolt_physics_server_3d.h"
 #include "../jolt_project_settings.h"
+#include "core/profiling/profiling.h"
 #include "../misc/jolt_math_funcs.h"
 #include "../misc/jolt_type_conversions.h"
 #include "../objects/jolt_area_3d.h"
@@ -885,18 +886,27 @@ bool JoltPhysicsDirectSpaceState3D::body_test_motion(const JoltBody3D &p_body, c
 	JoltMath::decompose(transform, scale);
 
 	Vector3 recovery;
-	const bool recovered = _body_motion_recover(p_body, transform, margin, p_parameters.exclude_bodies, p_parameters.exclude_objects, recovery);
+	bool recovered;
+	{
+		GodotProfileZone("jolt: motion recover");
+		recovered = _body_motion_recover(p_body, transform, margin, p_parameters.exclude_bodies, p_parameters.exclude_objects, recovery);
+	}
 
 	transform.origin += recovery;
 
 	real_t safe_fraction = 1.0;
 	real_t unsafe_fraction = 1.0;
 
-	const bool hit = _body_motion_cast(p_body, transform, scale, p_parameters.motion, p_parameters.collide_separation_ray, p_parameters.exclude_bodies, p_parameters.exclude_objects, safe_fraction, unsafe_fraction);
+	bool hit;
+	{
+		GodotProfileZone("jolt: motion cast");
+		hit = _body_motion_cast(p_body, transform, scale, p_parameters.motion, p_parameters.collide_separation_ray, p_parameters.exclude_bodies, p_parameters.exclude_objects, safe_fraction, unsafe_fraction);
+	}
 
 	bool collided = false;
 
 	if (hit || (recovered && p_parameters.recovery_as_collision)) {
+		GodotProfileZone("jolt: motion collide");
 		collided = _body_motion_collide(p_body, transform.translated(p_parameters.motion * unsafe_fraction), p_parameters.motion, margin, max_collisions, p_parameters.exclude_bodies, p_parameters.exclude_objects, r_result);
 	}
 
