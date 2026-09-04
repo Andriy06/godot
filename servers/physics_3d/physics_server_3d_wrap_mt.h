@@ -419,6 +419,9 @@ public:
 
 	virtual void init() override;
 	virtual void step(real_t p_step) override;
+	// Macrame frame graph: the calling task holds the space's write grant (a graph node);
+	// apply the staged commands and step inline.
+	void macrame_step_under_grant(real_t p_step);
 	virtual void sync() override;
 	virtual void end_sync() override;
 	virtual void flush_queries() override;

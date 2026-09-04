@@ -49,6 +49,7 @@
 
 #include "ts/deferred.h"
 #include "ts/guarded.h"
+#include "ts/priority.h"
 #include "ts/recorder.h"
 #include "ts/scheduler.h"
 #include "ts/task.h"
@@ -215,6 +216,10 @@ public:
 	// Apply every staged command as one write on the calling thread.
 	void flush_all() { sync(); }
 
+	// The caller holds the object's write grant (a graph node, a launched body): apply the staged
+	// journals inline.
+	void commit_under_grant() { _commit_inline(); }
+
 	void sync() {
 		GodotProfileZone("MacrameCommandQueue: sync + apply batch");
 		_wait_in_flight();
@@ -239,8 +244,10 @@ public:
 	// behind the running task, then `p_body` behind it, and stage the next frame into the
 	// other journal. Waits only if a task is already queued behind the running one, so the
 	// caller runs at most one frame ahead of the object.
+	// `p_priority`: the render draw is the frame's longest serial task and queues behind the
+	// shard nodes for a worker at equal priority; high puts it first in the ready queues.
 	template <typename Fn>
-	void launch_pipelined(Fn &&p_body, const char *p_name) {
+	void launch_pipelined(Fn &&p_body, const char *p_name, ts::Priority p_priority = ts::Priority::normal) {
 		_wait_oldest();
 		Journal &j = *cur;
 		if (j.has_commit_task) {
@@ -248,11 +255,11 @@ public:
 			j.has_commit_task = false;
 		}
 		if (j.count.load(std::memory_order_relaxed) != 0) {
-			j.commit_task = j.staged.commit(); // Enqueued: one write, cut when it runs, FIFO on the object.
+			j.commit_task = j.staged.commit({ .priority = p_priority }); // Enqueued: one write, cut when it runs, FIFO on the object.
 			j.has_commit_task = true;
 			j.count.store(0, std::memory_order_relaxed);
 		}
-		ts::Task<void> t = guarded.async(std::forward<Fn>(p_body), { .name = p_name });
+		ts::Task<void> t = guarded.async(std::forward<Fn>(p_body), { .priority = p_priority, .name = p_name });
 		if (has_in_flight) {
 			queued = std::move(t);
 			has_queued = true;

@@ -245,6 +245,8 @@ public:
 	static int macrame_shard_of(const Node *p_node);
 	int macrame_shard_of_group(void *p_group) const { return ((ProcessGroup *)p_group)->macrame_shard; }
 	void macrame_process_group(void *p_group, bool p_physics) { _process_group((ProcessGroup *)p_group, p_physics); }
+	// After the frame graph ran the captured shard batches: the flushes the phases do after their groups.
+	void macrame_post_shards();
 
 private:
 	void _process_groups_thread(uint32_t p_index, bool p_physics);

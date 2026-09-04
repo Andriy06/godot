@@ -66,6 +66,7 @@ void PhysicsServer3DWrapMT::step(real_t p_step) {
 	command_queue.launch([this, p_step](PhysicsGrantToken &) {
 		MacramePhysics::set_holds_grant(true);
 		MacrameRuntime::long_task_begin();
+		command_queue.commit_under_grant(); // The tick's staged writes reach this step (upstream FIFO semantics).
 		physics_server_3d->step(p_step);
 		MacrameRuntime::long_task_end();
 		MacramePhysics::set_holds_grant(false);
@@ -77,6 +78,19 @@ void PhysicsServer3DWrapMT::step(real_t p_step) {
 	} else {
 		physics_server_3d->step(p_step);
 	}
+}
+
+void PhysicsServer3DWrapMT::macrame_step_under_grant(real_t p_step) {
+#ifdef MACRAME_ENABLED
+	MacramePhysics::set_holds_grant(true);
+	MacrameRuntime::long_task_begin();
+	command_queue.commit_under_grant();
+	physics_server_3d->step(p_step);
+	MacrameRuntime::long_task_end();
+	MacramePhysics::set_holds_grant(false);
+#else
+	step(p_step);
+#endif
 }
 
 void PhysicsServer3DWrapMT::sync() {

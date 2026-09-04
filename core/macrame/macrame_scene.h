@@ -82,4 +82,15 @@ void check_main(const Node *p_node);
 // Run every group in `p_groups` (a null-terminated array is not used; count given) as
 // shard tasks and join them. Called from SceneTree::_process for a threaded batch.
 void run_groups(SceneTree *p_tree, void **p_groups, int p_group_count, bool p_physics);
+
+// Frame graph (experiment): the tick's shard fan-out, the physics step, the navigation update
+// and the frame's process fan-out as one compiled `Static_task_graph`, executed once per frame.
+// Per-shard edges (tick shard i -> frame shard i) let a shard's process phase start as soon as
+// its own physics phase is done, while the step and navigation run in the tick's tail. While
+// capturing, `run_groups()` records its batch for the graph instead of running it; the
+// blue-thread parts of the tree's phases run as before. MACRAME_FRAME_GRAPH=0 disables.
+bool frame_graph_enabled();
+void frame_set_capturing(bool p_capturing);
+void frame_set_tick(double p_step); // This frame carries a physics tick: the graph steps the space and updates navigation.
+void frame_execute(SceneTree *p_tree);
 } // namespace MacrameScene

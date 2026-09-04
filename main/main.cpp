@@ -48,6 +48,7 @@
 #include "core/io/image_loader.h"
 #include "core/io/resource_loader.h"
 #include "core/macrame/macrame_runtime.h"
+#include "core/macrame/macrame_scene.h"
 #include "core/io/resource_saver.h"
 #include "core/object/class_db.h"
 #include "core/object/message_queue.h"
@@ -4983,6 +4984,10 @@ bool Main::iteration() {
 		PhysicsServer2D::get_singleton()->flush_queries();
 #endif // PHYSICS_2D_DISABLED
 
+#ifdef MACRAME_ENABLED
+		const bool macrame_graph_tick = MacrameScene::frame_graph_enabled() && SceneTree::get_singleton() != nullptr && iters == advance.physics_steps - 1;
+		MacrameScene::frame_set_capturing(macrame_graph_tick); // The last tick's shard batches go to the frame graph.
+#endif
 		GodotProfileZoneGrouped(_physics_zone, "physics_process");
 		if (OS::get_singleton()->get_main_loop()->physics_process(physics_step * time_scale)) {
 #ifndef PHYSICS_3D_DISABLED
@@ -5005,7 +5010,15 @@ bool Main::iteration() {
 #ifndef PHYSICS_3D_DISABLED
 		GodotProfileZoneGrouped(_profile_zone, "3D physics");
 		PhysicsServer3D::get_singleton()->end_sync();
+#ifdef MACRAME_ENABLED
+		if (macrame_graph_tick) {
+			MacrameScene::frame_set_tick(physics_step * time_scale); // The graph's step node runs it after the tick shards.
+		} else {
+			PhysicsServer3D::get_singleton()->step(physics_step * time_scale);
+		}
+#else
 		PhysicsServer3D::get_singleton()->step(physics_step * time_scale);
+#endif
 #endif // PHYSICS_3D_DISABLED
 
 #ifndef PHYSICS_2D_DISABLED
@@ -5023,7 +5036,13 @@ bool Main::iteration() {
 #endif // NAVIGATION_2D_DISABLED
 #ifndef NAVIGATION_3D_DISABLED
 		GodotProfileZoneGrouped(_profile_zone, "NavigationServer3D::physics_process");
+#ifdef MACRAME_ENABLED
+		if (!macrame_graph_tick) {
+			NavigationServer3D::get_singleton()->physics_process(physics_step * time_scale);
+		}
+#else
 		NavigationServer3D::get_singleton()->physics_process(physics_step * time_scale);
+#endif
 #endif // NAVIGATION_3D_DISABLED
 
 		navigation_process_ticks = MAX(navigation_process_ticks, OS::get_singleton()->get_ticks_usec() - navigation_begin); // keep the largest one for reference
@@ -5049,11 +5068,22 @@ bool Main::iteration() {
 
 	uint64_t process_begin = OS::get_singleton()->get_ticks_usec();
 
+#ifdef MACRAME_ENABLED
+	const bool macrame_graph_frame = MacrameScene::frame_graph_enabled() && SceneTree::get_singleton() != nullptr;
+	MacrameScene::frame_set_capturing(macrame_graph_frame);
+#endif
 	GodotProfileZoneGrouped(_profile_zone, "process");
 	if (OS::get_singleton()->get_main_loop()->process(process_step * time_scale)) {
 		exit = true;
 	}
 	message_queue->flush();
+#ifdef MACRAME_ENABLED
+	if (macrame_graph_frame) {
+		// The frame graph: the captured tick shards, the step, navigation, the captured process shards.
+		MacrameScene::frame_execute(SceneTree::get_singleton());
+		message_queue->flush();
+	}
+#endif
 
 #ifndef NAVIGATION_2D_DISABLED
 	GodotProfileZoneGrouped(_profile_zone, "process 2D navigation");

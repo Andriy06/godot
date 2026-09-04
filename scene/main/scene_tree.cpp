@@ -1262,6 +1262,13 @@ void SceneTree::_process_groups_thread(uint32_t p_index, bool p_physics) {
 	Node::current_process_thread_group = nullptr;
 }
 
+void SceneTree::macrame_post_shards() {
+	GodotProfileZone("SceneTree::macrame_post_shards");
+	_flush_ugc();
+	MessageQueue::get_singleton()->flush();
+	flush_transform_notifications();
+}
+
 void SceneTree::_process(bool p_physics) {
 	GodotProfileZone("SceneTree::_process (node callbacks)");
 	if (process_groups_dirty) {

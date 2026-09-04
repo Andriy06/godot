@@ -36,9 +36,12 @@
 #include "core/macrame/macrame_render_outputs.h"
 #include "core/object/script_language.h"
 #include "core/os/os.h"
+#include "core/profiling/profiling.h"
 #include "core/string/print_string.h"
 #include "scene/main/node.h"
 #include "scene/main/scene_tree.h"
+#include "servers/navigation_3d/navigation_server_3d.h"
+#include "servers/physics_3d/physics_server_3d_wrap_mt.h"
 
 #include "ts/access.h"
 #include "ts/guarded.h"
@@ -80,8 +83,31 @@ struct PhaseGraph {
 	std::string names[MacrameScene::SHARD_COUNT]; // `ts::Named` keeps the pointer: stable storage.
 };
 
+struct NavGrantToken {
+	int unused = 0; // The navigation server's guarded identity (its update node writes, shards read).
+};
+
+// The whole frame as one graph: 32 tick shards, the step, navigation, 32 frame shards.
+struct FrameGraph {
+	ts::Static_task_graph graph;
+	ts::tools::Graph_trace trace;
+	std::vector<std::vector<void *>> tick_buckets;
+	std::vector<std::vector<void *>> frame_buckets;
+	SceneTree *tree = nullptr;
+	bool capturing = false;
+	bool tick_pending = false;
+	double tick_step = 0.0;
+	bool built = false;
+	uint64_t runs = 0;
+	bool written = false;
+	std::string tick_names[MacrameScene::SHARD_COUNT];
+	std::string frame_names[MacrameScene::SHARD_COUNT];
+};
+
 struct State {
 	std::vector<std::unique_ptr<ts::Guarded<SceneShardToken>>> shards;
+	std::unique_ptr<ts::Guarded<NavGrantToken>> nav_guard;
+	FrameGraph frame;
 	PhaseGraph physics_graph;
 	PhaseGraph process_graph;
 	std::vector<SceneShardToken *> shard_ptrs; // Stable addresses of the guarded tokens, for the harness.
@@ -91,6 +117,7 @@ struct State {
 };
 State *state = nullptr;
 void _write_phase_trace(PhaseGraph &pg);
+void _write_frame_trace(FrameGraph &fg);
 
 } // namespace
 
@@ -118,6 +145,7 @@ void MacrameScene::init() {
 	}
 	state->main_shard.reset(new ts::Guarded<SceneShardToken>(ts::Named{ "scene_main_shard" }));
 	state->main_shard->access([&](SceneShardToken &t) { state->main_ptr = &t; }).sync();
+	state->nav_guard.reset(new ts::Guarded<NavGrantToken>(ts::Named{ "navigation" }));
 	print_verbose(vformat("Macrame: %d scene shards.", SHARD_COUNT));
 }
 
@@ -125,6 +153,9 @@ void MacrameScene::finish() {
 	if (state) {
 		const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
 		if (!dir.is_empty()) {
+			if (state->frame.built && !state->frame.written) {
+				_write_frame_trace(state->frame);
+			}
 			for (PhaseGraph *pg : { &state->physics_graph, &state->process_graph }) {
 				if (pg->built && !pg->written) {
 					_write_phase_trace(*pg);
@@ -244,6 +275,14 @@ void MacrameScene::run_groups(SceneTree *p_tree, void **p_groups, int p_group_co
 		buckets[s].push_back(p_groups[i]);
 	}
 
+	if (state->frame.capturing) {
+		// Frame-graph mode: the graph runs this batch; groups without a shard already ran above.
+		std::vector<std::vector<void *>> &dst = p_physics ? state->frame.tick_buckets : state->frame.frame_buckets;
+		dst.swap(buckets);
+		state->frame.tree = p_tree;
+		return;
+	}
+
 	static const bool use_graph = OS::get_singleton()->get_environment("MACRAME_STATIC_GRAPH") != "0";
 	if (use_graph) {
 		PhaseGraph &pg = p_physics ? state->physics_graph : state->process_graph;
@@ -287,6 +326,123 @@ void MacrameScene::run_groups(SceneTree *p_tree, void **p_groups, int p_group_co
 	}
 }
 
+namespace {
+
+void _write_frame_trace(FrameGraph &fg) {
+	const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
+	if (dir.is_empty() || !fg.built) {
+		return;
+	}
+	const String path = dir + "/macrame_frame_avg.svg";
+	const bool ok = fg.trace.write_SVG(path.utf8().get_data());
+	fg.written = true;
+	print_line(vformat("Macrame: frame trace of %d runs %s -> %s", (int)fg.runs, ok ? "written" : "FAILED", path));
+	fflush(stdout);
+}
+
+void _run_bucket(FrameGraph &fg, const std::vector<void *> &p_groups, int p_shard, bool p_physics, const MacrameRenderOutputs &p_outputs) {
+	if (p_groups.empty()) {
+		return;
+	}
+	ScriptServer::thread_enter();
+	set_context(p_shard, true);
+	MacrameRenderSnapshot::set_current(&p_outputs);
+	for (void *g : p_groups) {
+		fg.tree->macrame_process_group(g, p_physics);
+	}
+	MacrameRenderSnapshot::set_current(nullptr);
+	set_context(-1, false);
+}
+
+void _build_frame_graph(FrameGraph &fg, ts::Guarded<PhysicsGrantToken> *p_space) {
+	fg.tick_buckets.resize(MacrameScene::SHARD_COUNT);
+	fg.frame_buckets.resize(MacrameScene::SHARD_COUNT);
+	std::vector<ts::Graph_node> tick_nodes;
+	tick_nodes.reserve(MacrameScene::SHARD_COUNT);
+	for (int s = 0; s < MacrameScene::SHARD_COUNT; s++) {
+		fg.tick_names[s] = "tick shard " + std::to_string(s);
+		tick_nodes.push_back(fg.graph.add_node(ts::Named{ fg.tick_names[s].c_str() },
+				[&fg, s](SceneShardToken &, const SceneShardToken &, const PhysicsGrantToken &, const NavGrantToken &, const MacrameRenderOutputs &p_outputs) {
+					if (fg.tick_pending) {
+						_run_bucket(fg, fg.tick_buckets[s], s, true, p_outputs);
+					}
+				},
+				*state->shards[s], *state->main_shard, *p_space, *state->nav_guard, MacrameRenderSnapshot::front()));
+	}
+	// The step writes the space every tick shard read: compile() derives the edges. It also
+	// applies the tick's staged body writes first (upstream FIFO semantics).
+	fg.graph.add_node("physics step", [&fg](PhysicsGrantToken &) {
+		if (fg.tick_pending) {
+			static_cast<PhysicsServer3DWrapMT *>(PhysicsServer3D::get_singleton())->macrame_step_under_grant(fg.tick_step);
+		}
+	}, *p_space).set_priority(ts::Priority::high);
+	fg.graph.add_node("navigation", [&fg](NavGrantToken &) {
+		if (fg.tick_pending) {
+			NavigationServer3D::get_singleton()->physics_process(fg.tick_step);
+		}
+	}, *state->nav_guard).set_priority(ts::Priority::high);
+	for (int s = 0; s < MacrameScene::SHARD_COUNT; s++) {
+		fg.frame_names[s] = "frame shard " + std::to_string(s);
+		// A shard's process phase follows its own physics phase (the derived write-write edge; the
+		// explicit `after` fixes the direction) and nothing else: it overlaps the tick's tail, the
+		// step and navigation. Physics queries from _process are refused by the wrapper's guard.
+		fg.graph.add_node(ts::Named{ fg.frame_names[s].c_str() },
+				[&fg, s](SceneShardToken &, const SceneShardToken &, const MacrameRenderOutputs &p_outputs) {
+					_run_bucket(fg, fg.frame_buckets[s], s, false, p_outputs);
+				},
+				*state->shards[s], *state->main_shard, MacrameRenderSnapshot::front()).after(tick_nodes[s]);
+	}
+	const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
+	const String dot = dir.is_empty() ? String() : dir + "/macrame_frame.dot";
+	fg.graph.compile(dot.is_empty() ? nullptr : dot.utf8().get_data());
+	fg.graph.set_trace(&fg.trace);
+	fg.built = true;
+	print_verbose(vformat("Macrame: frame compiled as a static graph (%d nodes).", fg.graph.node_count()));
+}
+
+} // namespace
+
+bool MacrameScene::frame_graph_enabled() {
+	static const bool enabled = OS::get_singleton()->get_environment("MACRAME_FRAME_GRAPH") != "0";
+	return enabled && state != nullptr && MacramePhysics::get_guarded() != nullptr;
+}
+
+void MacrameScene::frame_set_capturing(bool p_capturing) {
+	ERR_FAIL_NULL(state);
+	state->frame.capturing = p_capturing;
+}
+
+void MacrameScene::frame_set_tick(double p_step) {
+	ERR_FAIL_NULL(state);
+	state->frame.tick_pending = true;
+	state->frame.tick_step = p_step;
+}
+
+void MacrameScene::frame_execute(SceneTree *p_tree) {
+	ERR_FAIL_NULL(state);
+	FrameGraph &fg = state->frame;
+	fg.capturing = false;
+	if (!fg.built) {
+		_build_frame_graph(fg, MacramePhysics::get_guarded());
+	}
+	fg.tree = p_tree;
+	{
+		GodotProfileZone("Macrame: frame graph");
+		fg.graph.execute().sync();
+	}
+	fg.tick_pending = false;
+	for (auto &b : fg.tick_buckets) {
+		b.clear();
+	}
+	for (auto &b : fg.frame_buckets) {
+		b.clear();
+	}
+	if (++fg.runs == 3000 && !fg.written) {
+		_write_frame_trace(fg);
+	}
+	p_tree->macrame_post_shards();
+}
+
 #else
 
 void MacrameScene::init() {}
@@ -299,5 +455,9 @@ void MacrameScene::check_write(const Node *) {}
 void MacrameScene::check_read(const Node *) {}
 void MacrameScene::check_main(const Node *) {}
 void MacrameScene::run_groups(SceneTree *, void **, int, bool) {}
+bool MacrameScene::frame_graph_enabled() { return false; }
+void MacrameScene::frame_set_capturing(bool) {}
+void MacrameScene::frame_set_tick(double) {}
+void MacrameScene::frame_execute(SceneTree *) {}
 
 #endif // MACRAME_ENABLED

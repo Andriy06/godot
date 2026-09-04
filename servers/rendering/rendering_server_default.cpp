@@ -503,7 +503,7 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 		_draw(p_present, frame_step);
 		MacrameRuntime::long_task_end();
 		MacrameRender::set_holds_grant(false);
-	}, "render");
+	}, "render", ts::Priority::high);
 	return;
 #endif
 	if (create_thread) {
