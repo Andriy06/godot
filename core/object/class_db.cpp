@@ -2129,6 +2129,11 @@ bool ClassDB::is_default_array_arg(const Array &p_array) {
 ClassDB::Locker::Lock::Lock(Locker::State p_state) {
 	DEV_ASSERT(p_state != STATE_UNLOCKED);
 	if (p_state == STATE_READ) {
+#ifdef MACRAME_ENABLED
+		// Experiment (phase 6 candidate): ClassDB is effectively immutable once the engine is up;
+		// reads take no lock. Registration (writes) still happens on the blue thread alone.
+		return;
+#endif
 		if (Locker::thread_state == STATE_UNLOCKED) {
 			state = STATE_READ;
 			Locker::thread_state = STATE_READ;

@@ -917,6 +917,16 @@ public:
 
 		ERR_FAIL_COND_V(slot >= slot_max, nullptr); // This should never happen unless RID is corrupted.
 
+#ifdef MACRAME_ENABLED
+		// Experiment (phase 6 candidate): lock-free lookup. The slot table only grows on the blue
+		// thread between shard phases and objects are only freed there, so a shard's read
+		// observes a stable table. To be made a proper chunked, atomically published table.
+		uint64_t validator = (id >> OBJECTDB_SLOT_MAX_COUNT_BITS) & OBJECTDB_VALIDATOR_MASK;
+		if (unlikely(object_slots[slot].validator != validator)) {
+			return nullptr;
+		}
+		return object_slots[slot].object;
+#else
 		spin_lock.lock();
 
 		uint64_t validator = (id >> OBJECTDB_SLOT_MAX_COUNT_BITS) & OBJECTDB_VALIDATOR_MASK;
@@ -931,6 +941,7 @@ public:
 		spin_lock.unlock();
 
 		return object;
+#endif
 	}
 
 	template <typename T>
