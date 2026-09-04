@@ -127,7 +127,12 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 	RSG::scene->update_visibility_notifiers();
 
 	GodotProfileZoneGrouped(_profile_zone, "post_draw_steps");
-	if (create_thread) {
+#ifdef MACRAME_ENABLED
+	const bool off_main_thread = true; // _draw runs on a worker; post-draw callbacks belong to the main thread.
+#else
+	const bool off_main_thread = create_thread;
+#endif
+	if (off_main_thread) {
 		callable_mp(this, &RenderingServerDefault::_run_post_draw_steps).call_deferred();
 	} else {
 		_run_post_draw_steps();
@@ -274,6 +279,11 @@ void RenderingServerDefault::_finish() {
 }
 
 void RenderingServerDefault::init() {
+#ifdef MACRAME_ENABLED
+	server_thread = Thread::MAIN_ID;
+	_init();
+	return;
+#endif
 	if (create_thread) {
 		print_verbose("RenderingServerWrapMT: Starting render thread");
 		DisplayServer::get_singleton()->release_rendering_thread();
@@ -289,6 +299,12 @@ void RenderingServerDefault::init() {
 }
 
 void RenderingServerDefault::finish() {
+#ifdef MACRAME_ENABLED
+	command_queue.wait();
+	command_queue.sync();
+	_finish();
+	return;
+#endif
 	if (create_thread) {
 		command_queue.push(this, &RenderingServerDefault::_finish);
 		command_queue.push(this, &RenderingServerDefault::_thread_exit);
@@ -437,6 +453,11 @@ void RenderingServerDefault::set_physics_interpolation_enabled(bool p_enabled) {
 /* EVENT QUEUING */
 
 void RenderingServerDefault::sync() {
+#ifdef MACRAME_ENABLED
+	// Wait for the in-flight draw, then apply every command the frame staged, as one write.
+	command_queue.sync();
+	return;
+#endif
 	if (create_thread) {
 		command_queue.sync();
 	} else {
@@ -449,6 +470,16 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	// Needs to be done before changes is reset to 0, to not force the editor to redraw.
 	RS::get_singleton()->emit_signal(SNAME("frame_pre_draw"));
 	changes = 0;
+#ifdef MACRAME_ENABLED
+	// The draw runs as an asynchronous write task on the renderer and overlaps the next
+	// frame's simulation; the next sync() joins it. sync() has already applied the batch.
+	command_queue.launch([this, p_present, frame_step](RenderGrantToken &) {
+		MacrameRender::set_holds_grant(true);
+		_draw(p_present, frame_step);
+		MacrameRender::set_holds_grant(false);
+	}, "render");
+	return;
+#endif
 	if (create_thread) {
 		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step);
 	} else {

@@ -32,7 +32,9 @@
 
 #include "core/typedefs.h"
 
-#ifdef THREADS_ENABLED
+// Macrame conversion: the engine spawns no threads of its own, but Macrame's workers run
+// engine code, so the lock primitives stay real wherever legacy code still shares state.
+#if defined(THREADS_ENABLED) || defined(MACRAME_ENABLED)
 
 #ifdef MINGW_ENABLED
 #define MINGW_STDTHREAD_REDUNDANCY_WARNING

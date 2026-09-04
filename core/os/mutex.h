@@ -41,7 +41,9 @@
 #define THREADING_NAMESPACE std
 #endif
 
-#ifdef THREADS_ENABLED
+// Macrame conversion: the engine spawns no threads of its own, but Macrame's workers run
+// engine code, so the lock primitives stay real wherever legacy code still shares state.
+#if defined(THREADS_ENABLED) || defined(MACRAME_ENABLED)
 
 template <typename MutexT>
 class MutexLock;

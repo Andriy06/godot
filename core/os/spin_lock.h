@@ -33,7 +33,9 @@
 #include "core/os/thread.h"
 #include "core/typedefs.h"
 
-#ifdef THREADS_ENABLED
+// Macrame conversion: the engine spawns no threads of its own, but Macrame's workers run
+// engine code, so the lock primitives stay real wherever legacy code still shares state.
+#if defined(THREADS_ENABLED) || defined(MACRAME_ENABLED)
 
 // Note the implementations below avoid false sharing by ensuring their
 // sizes match the assumed cache line. We can't use align attributes

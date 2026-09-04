@@ -34,7 +34,9 @@
 #include "core/os/mutex.h"
 #include "core/typedefs.h"
 
-#ifdef THREADS_ENABLED
+// Macrame conversion: the engine spawns no threads of its own, but Macrame's workers run
+// engine code, so the lock primitives stay real wherever legacy code still shares state.
+#if defined(THREADS_ENABLED) || defined(MACRAME_ENABLED)
 
 GODOT_CLANG_WARNING_PUSH_AND_IGNORE("-Wundefined-var-template")
 

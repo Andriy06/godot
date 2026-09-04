@@ -162,6 +162,9 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 		}
 	}
 
+#ifndef THREADS_ENABLED
+	task_mutex.unlock(); // Both branches above lock; the threaded epilogue below unlocks only when compiled in.
+#endif
 #ifdef THREADS_ENABLED
 	{
 		curr_thread.current_task = prev_task;

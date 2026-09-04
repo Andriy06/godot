@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  condition_variable.h                                                  */
+/*  macrame_render_grant.cpp                                              */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -28,61 +28,22 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
-#pragma once
+#include "macrame_render_grant.h"
 
-#include "core/os/mutex.h"
-#include "core/os/safe_binary_mutex.h"
-
-// Macrame conversion: the engine spawns no threads of its own, but Macrame's workers run
-// engine code, so the lock primitives stay real wherever legacy code still shares state.
-#if defined(THREADS_ENABLED) || defined(MACRAME_ENABLED)
-
-#ifdef MINGW_ENABLED
-#define MINGW_STDTHREAD_REDUNDANCY_WARNING
-#include <thirdparty/mingw-std-threads/mingw.condition_variable.h>
-#define THREADING_NAMESPACE mingw_stdthread
+#if defined(_MSC_VER) && !defined(__clang__)
+#define MACRAME_NO_INLINE __declspec(noinline)
 #else
-#include <condition_variable>
-#define THREADING_NAMESPACE std
+#define MACRAME_NO_INLINE [[gnu::noinline]]
 #endif
 
-// An object one or multiple threads can wait on a be notified by some other.
-// Normally, you want to use a semaphore for such scenarios, but when the
-// condition is something different than a count being greater than zero
-// (which is the built-in logic in a semaphore) or you want to provide your
-// own mutex to tie the wait-notify to some other behavior, you need to use this.
+namespace {
+thread_local bool holds_render_grant = false;
+} // namespace
 
-class ConditionVariable {
-	mutable THREADING_NAMESPACE::condition_variable condition;
+MACRAME_NO_INLINE bool MacrameRender::holds_grant() {
+	return holds_render_grant;
+}
 
-public:
-	template <typename BinaryMutexT>
-	_ALWAYS_INLINE_ void wait(const MutexLock<BinaryMutexT> &p_lock) const {
-		condition.wait(p_lock._get_lock());
-	}
-
-	template <int Tag>
-	_ALWAYS_INLINE_ void wait(const MutexLock<SafeBinaryMutex<Tag>> &p_lock) const {
-		condition.wait(p_lock.mutex._get_lock());
-	}
-
-	_ALWAYS_INLINE_ void notify_one() const {
-		condition.notify_one();
-	}
-
-	_ALWAYS_INLINE_ void notify_all() const {
-		condition.notify_all();
-	}
-};
-
-#else // No threads.
-
-class ConditionVariable {
-public:
-	template <typename BinaryMutexT>
-	void wait(const MutexLock<BinaryMutexT> &p_lock) const {}
-	void notify_one() const {}
-	void notify_all() const {}
-};
-
-#endif // THREADS_ENABLED
+MACRAME_NO_INLINE void MacrameRender::set_holds_grant(bool p_holds) {
+	holds_render_grant = p_holds;
+}

@@ -33,6 +33,10 @@
 #include "core/object/worker_thread_pool.h"
 #include "core/os/thread.h"
 #include "core/templates/command_queue_mt.h"
+#ifdef MACRAME_ENABLED
+#include "core/macrame/macrame_command_queue.h"
+#include "core/macrame/macrame_render_grant.h"
+#endif
 #include "core/templates/hash_map.h"
 #include "servers/rendering/renderer_canvas_cull.h"
 #include "servers/rendering/renderer_compositor.h"
@@ -77,7 +81,12 @@ class RenderingServerDefault : public RenderingServer {
 	uint64_t print_frame_profile_ticks_from = 0;
 	uint32_t print_frame_profile_frame_count = 0;
 
+#ifdef MACRAME_ENABLED
+	// Phase 1: staged commands into one guarded renderer; the draw is an async write task.
+	mutable MacrameCommandQueue<RenderGrantToken> command_queue{ "renderer" };
+#else
 	mutable CommandQueueMT command_queue;
+#endif
 
 	Thread::ID server_thread = Thread::MAIN_ID;
 	WorkerThreadPool::TaskID server_task_id = WorkerThreadPool::INVALID_TASK_ID;
@@ -114,10 +123,18 @@ public:
 #endif
 
 #define WRITE_ACTION redraw_request();
-#define ASYNC_COND_PUSH (Thread::get_caller_id() != server_thread)
-#define ASYNC_COND_PUSH_AND_RET (Thread::get_caller_id() != server_thread)
-#define ASYNC_COND_PUSH_AND_SYNC (Thread::get_caller_id() != server_thread)
+#ifdef MACRAME_ENABLED
+#define RS_ON_SERVER_THREAD (MacrameRender::holds_grant())
+#else
+#define RS_ON_SERVER_THREAD (RS_ON_SERVER_THREAD)
+#endif
+#define ASYNC_COND_PUSH (!RS_ON_SERVER_THREAD)
+#define ASYNC_COND_PUSH_AND_RET (!RS_ON_SERVER_THREAD)
+#define ASYNC_COND_PUSH_AND_SYNC (!RS_ON_SERVER_THREAD)
 
+#ifdef MACRAME_SYNC_TRACE // Diagnostic: name every synchronous renderer round trip on stdout.
+#define DEBUG_SYNC
+#endif
 #ifdef DEBUG_SYNC
 #define SYNC_DEBUG print_line("sync on: " + String(__FUNCTION__));
 #else
@@ -136,7 +153,7 @@ public:
 #define FUNCRIDTEX0(m_type) \
 	virtual RID m_type##_create() override { \
 		RID ret = RSG::texture_storage->texture_allocate(); \
-		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) { \
+		if (RS_ON_SERVER_THREAD || RSG::rasterizer->can_create_resources_async()) { \
 			RSG::texture_storage->m_type##_initialize(ret); \
 		} else { \
 			command_queue.push(RSG::texture_storage, &RendererTextureStorage::m_type##_initialize, ret); \
@@ -147,7 +164,7 @@ public:
 #define FUNCRIDTEX1(m_type, m_type1) \
 	virtual RID m_type##_create(m_type1 p1) override { \
 		RID ret = RSG::texture_storage->texture_allocate(); \
-		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) { \
+		if (RS_ON_SERVER_THREAD || RSG::rasterizer->can_create_resources_async()) { \
 			RSG::texture_storage->m_type##_initialize(ret, p1); \
 		} else { \
 			command_queue.push(RSG::texture_storage, &RendererTextureStorage::m_type##_initialize, ret, p1); \
@@ -158,7 +175,7 @@ public:
 #define FUNCRIDTEX2(m_type, m_type1, m_type2) \
 	virtual RID m_type##_create(m_type1 p1, m_type2 p2) override { \
 		RID ret = RSG::texture_storage->texture_allocate(); \
-		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) { \
+		if (RS_ON_SERVER_THREAD || RSG::rasterizer->can_create_resources_async()) { \
 			RSG::texture_storage->m_type##_initialize(ret, p1, p2); \
 		} else { \
 			command_queue.push(RSG::texture_storage, &RendererTextureStorage::m_type##_initialize, ret, p1, p2); \
@@ -169,7 +186,7 @@ public:
 #define FUNCRIDTEX3(m_type, m_type1, m_type2, m_type3) \
 	virtual RID m_type##_create(m_type1 p1, m_type2 p2, m_type3 p3) override { \
 		RID ret = RSG::texture_storage->texture_allocate(); \
-		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) { \
+		if (RS_ON_SERVER_THREAD || RSG::rasterizer->can_create_resources_async()) { \
 			RSG::texture_storage->m_type##_initialize(ret, p1, p2, p3); \
 		} else { \
 			command_queue.push(RSG::texture_storage, &RendererTextureStorage::m_type##_initialize, ret, p1, p2, p3); \
@@ -180,7 +197,7 @@ public:
 #define FUNCRIDTEX4(m_type, m_type1, m_type2, m_type3, m_type4) \
 	virtual RID m_type##_create(m_type1 p1, m_type2 p2, m_type3 p3, m_type4 p4) override { \
 		RID ret = RSG::texture_storage->texture_allocate(); \
-		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) { \
+		if (RS_ON_SERVER_THREAD || RSG::rasterizer->can_create_resources_async()) { \
 			RSG::texture_storage->m_type##_initialize(ret, p1, p2, p3, p4); \
 		} else { \
 			command_queue.push(RSG::texture_storage, &RendererTextureStorage::m_type##_initialize, ret, p1, p2, p3, p4); \
@@ -191,7 +208,7 @@ public:
 #define FUNCRIDTEX5(m_type, m_type1, m_type2, m_type3, m_type4, m_type5) \
 	virtual RID m_type##_create(m_type1 p1, m_type2 p2, m_type3 p3, m_type4 p4, m_type5 p5) override { \
 		RID ret = RSG::texture_storage->texture_allocate(); \
-		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) { \
+		if (RS_ON_SERVER_THREAD || RSG::rasterizer->can_create_resources_async()) { \
 			RSG::texture_storage->m_type##_initialize(ret, p1, p2, p3, p4, p5); \
 		} else { \
 			command_queue.push(RSG::texture_storage, &RendererTextureStorage::m_type##_initialize, ret, p1, p2, p3, p4, p5); \
@@ -202,7 +219,7 @@ public:
 #define FUNCRIDTEX6(m_type, m_type1, m_type2, m_type3, m_type4, m_type5, m_type6) \
 	virtual RID m_type##_create(m_type1 p1, m_type2 p2, m_type3 p3, m_type4 p4, m_type5 p5, m_type6 p6) override { \
 		RID ret = RSG::texture_storage->texture_allocate(); \
-		if (Thread::get_caller_id() == server_thread || RSG::rasterizer->can_create_resources_async()) { \
+		if (RS_ON_SERVER_THREAD || RSG::rasterizer->can_create_resources_async()) { \
 			RSG::texture_storage->m_type##_initialize(ret, p1, p2, p3, p4, p5, p6); \
 		} else { \
 			command_queue.push(RSG::texture_storage, &RendererTextureStorage::m_type##_initialize, ret, p1, p2, p3, p4, p5, p6); \
@@ -280,7 +297,7 @@ public:
 
 	virtual RID shader_create() override {
 		RID ret = RSG::material_storage->shader_allocate();
-		if (Thread::get_caller_id() == server_thread) {
+		if (RS_ON_SERVER_THREAD) {
 			RSG::material_storage->shader_initialize(ret, false);
 		} else {
 			command_queue.push(RSG::material_storage, &ServerName::shader_initialize, ret, false);
@@ -290,7 +307,7 @@ public:
 
 	virtual RID shader_create_from_code(const String &p_code, const String &p_path_hint = String()) override {
 		RID shader = RSG::material_storage->shader_allocate();
-		bool using_server_thread = Thread::get_caller_id() == server_thread;
+		bool using_server_thread = RS_ON_SERVER_THREAD;
 		if (using_server_thread || RSG::rasterizer->can_create_resources_async()) {
 			if (using_server_thread) {
 				command_queue.flush_if_pending();
@@ -326,7 +343,7 @@ public:
 
 	virtual RID material_create_from_shader(RID p_next_pass, int p_render_priority, RID p_shader) override {
 		RID material = RSG::material_storage->material_allocate();
-		bool using_server_thread = Thread::get_caller_id() == server_thread;
+		bool using_server_thread = RS_ON_SERVER_THREAD;
 		if (using_server_thread || RSG::rasterizer->can_create_resources_async()) {
 			if (using_server_thread) {
 				command_queue.flush_if_pending();
@@ -366,7 +383,7 @@ public:
 	virtual RID mesh_create_from_surfaces(const Vector<RenderingServerTypes::SurfaceData> &p_surfaces, int p_blend_shape_count = 0) override {
 		RID mesh = RSG::mesh_storage->mesh_allocate();
 
-		bool using_server_thread = Thread::get_caller_id() == server_thread;
+		bool using_server_thread = RS_ON_SERVER_THREAD;
 		if (using_server_thread || RSG::rasterizer->can_create_resources_async()) {
 			if (using_server_thread) {
 				command_queue.flush_if_pending();
@@ -1197,7 +1214,7 @@ public:
 	/* FREE */
 
 	virtual void free_rid(RID p_rid) override {
-		if (Thread::get_caller_id() == server_thread) {
+		if (RS_ON_SERVER_THREAD) {
 			command_queue.flush_if_pending();
 			_free(p_rid);
 		} else {
@@ -1222,11 +1239,11 @@ public:
 	virtual void pre_draw(bool p_will_draw) override;
 
 	virtual bool is_on_render_thread() override {
-		return Thread::get_caller_id() == server_thread;
+		return RS_ON_SERVER_THREAD;
 	}
 
 	virtual void call_on_render_thread(const Callable &p_callable) override {
-		if (Thread::get_caller_id() == server_thread) {
+		if (RS_ON_SERVER_THREAD) {
 			command_queue.flush_if_pending();
 			p_callable.call();
 		} else {

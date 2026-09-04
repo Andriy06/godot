@@ -609,7 +609,15 @@ void GPUParticles3D::_notification(int p_what) {
 
 		case NOTIFICATION_VISIBILITY_CHANGED: {
 			// Make sure particles are updated before rendering occurs if they were active before.
-			if (is_visible_in_tree() && !RS::get_singleton()->particles_is_inactive(particles)) {
+#ifdef MACRAME_ENABLED
+			// `particles_is_inactive` is a synchronous round trip to the renderer, which now runs a
+			// frame behind on a worker; asking every frame would serialize the two. Until render
+			// outputs are published as a snapshot (phase 2), treat the system as active.
+			const bool particles_active = true;
+#else
+			const bool particles_active = !RS::get_singleton()->particles_is_inactive(particles);
+#endif
+			if (is_visible_in_tree() && particles_active) {
 				RS::get_singleton()->particles_request_process(particles);
 			}
 		} break;
