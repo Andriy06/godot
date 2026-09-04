@@ -1,0 +1,25 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+import pathlib
+
+Import("env")
+
+# The Macrame task system is consumed from an external checkout (`macrame_path`), never
+# vendored: this fork is public and Macrame is not yet. Its six core translation units are
+# compiled into core with Godot's flags; the tree is already built as C++23 when
+# `macrame_path` is set (see SConstruct).
+
+env.add_source_files(env.core_sources, "*.cpp")
+
+if env["macrame_path"]:
+    macrame_root = pathlib.Path(env["macrame_path"]).absolute()
+    if not (macrame_root / "include" / "ts" / "ts.h").is_file():
+        print("macrame_path must point at a Macrame checkout (include/ts/ts.h not found). Aborting.")
+        Exit(255)
+
+    env_macrame = env.Clone()
+    env_macrame.disable_warnings()
+    env_macrame.Prepend(CPPPATH=[str(macrame_root / "tools")])
+    for name in ["access", "fatal", "guarded", "scheduler", "static_task_graph", "worker_thread"]:
+        env_macrame.add_source_files(env.core_sources, str(macrame_root / "src" / f"{name}.cpp"))

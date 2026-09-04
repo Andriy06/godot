@@ -47,6 +47,7 @@
 #include "core/io/image.h"
 #include "core/io/image_loader.h"
 #include "core/io/resource_loader.h"
+#include "core/macrame/macrame_runtime.h"
 #include "core/io/resource_saver.h"
 #include "core/object/class_db.h"
 #include "core/object/message_queue.h"
@@ -2109,6 +2110,8 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		WorkerThreadPool::get_singleton()->init(0, 0);
 #endif
 	}
+
+	MacrameRuntime::init(GLOBAL_DEF_RST("threading/macrame/workers", 0));
 
 #ifdef TOOLS_ENABLED
 	if (!project_manager && !editor) {
@@ -5359,6 +5362,8 @@ void Main::cleanup(bool p_force) {
 	uninitialize_modules(MODULE_INITIALIZATION_LEVEL_CORE);
 
 	memdelete(engine);
+
+	MacrameRuntime::finish();
 
 	unregister_core_types();
 

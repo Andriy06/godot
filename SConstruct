@@ -217,6 +217,7 @@ opts.Add(
     )
 )
 opts.Add(("profiler_path", "Path to the Profiler framework.", ""))
+opts.Add(("macrame_path", "Path to a Macrame task-system checkout; enables the Macrame conversion (builds the tree as C++23).", ""))
 opts.Add(
     BoolVariable(
         "profiler_sample_callstack",
@@ -911,18 +912,27 @@ if not env.msvc:
     # Specifying GNU extensions support explicitly, which are supported by
     # both GCC and Clang. Both currently default to gnu17 and gnu++17.
     env.Prepend(CFLAGS=["-std=gnu17"])
-    env.Prepend(CXXFLAGS=["-std=gnu++17"])
+    env.Prepend(CXXFLAGS=["-std=gnu++23" if env["macrame_path"] else "-std=gnu++17"])
 else:
     # MSVC started offering C standard support with Visual Studio 2019 16.8, which covers all
     # of our supported Visual Studio versions.
     env.Prepend(CFLAGS=["/std:c17"])
-    env.Prepend(CXXFLAGS=["/std:c++17"])
+    # Macrame requires C++23; the whole tree is built at that level when it is enabled
+    # (verified clean under MSVC on this fork).
+    env.Prepend(CXXFLAGS=["/std:c++latest" if env["macrame_path"] else "/std:c++17"])
     # MSVC is non-conforming with the C++ standard by default, so we enable more conformance.
     # Note that this is still not complete conformance, as certain Windows-related headers
     # don't compile under complete conformance.
     env.Prepend(CCFLAGS=["/permissive-"])
     # Allow use of `__cplusplus` macro to determine C++ standard universally.
     env.Prepend(CXXFLAGS=["/Zc:__cplusplus"])
+
+if env["macrame_path"]:
+    import pathlib as _pl
+    _macrame_root = _pl.Path(env["macrame_path"]).absolute()
+    env.Prepend(CPPPATH=[str(_macrame_root / "include")])
+    # These are ODR-load-bearing in Macrame (detect_mismatch); keep them identical in every TU.
+    env.Append(CPPDEFINES=["MACRAME_ENABLED", ("TS_SAFETY_CHECKS", 1), ("TS_PROFILING", 1)])
 
 # Disable exception handling. Godot doesn't use exceptions anywhere, and this
 # saves around 20% of binary size and very significant build time (GH-80513).
