@@ -423,6 +423,17 @@ public:
 	/********************/
 
 private:
+	// One swapchain image acquisition. Upstream keeps a single acquired `image_index` per swap
+	// chain and attaches the acquire semaphore to "the next submit on this queue", which forces
+	// acquire and submit to alternate on one thread. The split draw records frame N+1 while the
+	// device task submits frame N, so an acquisition is a value that travels with its frame: the
+	// acquires queue up here in order and each submit that presents the chain consumes the oldest.
+	struct SwapChainAcquisition {
+		CommandQueue *command_queue = nullptr;
+		uint32_t semaphore_index = 0;
+		uint32_t image_index = 0;
+	};
+
 	struct SwapChain {
 		VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
 		RenderingContextDriver::SurfaceID surface = RenderingContextDriver::SurfaceID();
@@ -435,6 +446,7 @@ private:
 		TightLocalVector<FramebufferID> framebuffers;
 		LocalVector<CommandQueue *> command_queues_acquired;
 		LocalVector<uint32_t> command_queues_acquired_semaphores;
+		LocalVector<SwapChainAcquisition> pending_acquisitions; // FIFO: oldest acquire presents first.
 		RenderPassID render_pass;
 		int pre_transform_rotation_degrees = 0;
 		uint32_t image_index = 0;
@@ -442,6 +454,10 @@ private:
 		uint64_t refresh_duration = 0;
 #endif
 	};
+
+	// Guards the acquisition bookkeeping (`pending_acquisitions`, the queue's semaphore free list
+	// and the fence association), which the render task and the device task both reach.
+	BinaryMutex swap_chain_acquisition_mutex;
 
 	bool _determine_swap_chain_format(RenderingContextDriver::SurfaceID p_surface, VkFormat &r_format, VkColorSpaceKHR &r_color_space, RDD::ColorSpace &r_rdd_color_space);
 	void _swap_chain_release(SwapChain *p_swap_chain);

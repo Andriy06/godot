@@ -1798,7 +1798,7 @@ void RenderingDeviceGraph::finalize() {
 	frames.clear();
 }
 
-void RenderingDeviceGraph::begin() {
+void RenderingDeviceGraph::begin(int64_t p_tracking_frame) {
 	command_data.clear();
 	command_data_offsets.clear();
 	command_normalization_barriers.clear();
@@ -1820,7 +1820,8 @@ void RenderingDeviceGraph::begin() {
 	frames[frame].secondary_command_buffers_used = 0;
 	draw_instruction_list.index = 0;
 	compute_instruction_list.index = 0;
-	tracking_frame++;
+	DEV_ASSERT(p_tracking_frame > tracking_frame);
+	tracking_frame = p_tracking_frame;
 
 #ifdef DEV_ENABLED
 	write_dependency_counters.clear();

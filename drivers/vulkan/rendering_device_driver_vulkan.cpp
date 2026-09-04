@@ -3109,6 +3109,7 @@ Error RenderingDeviceDriverVulkan::fence_wait(FenceID p_fence) {
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FAILED, vformat("Couldn't reset Vulkan fence (VkResult error %d).", err));
 
 	if (fence->queue_signaled_from != nullptr) {
+		MutexLock acquisition_lock(swap_chain_acquisition_mutex);
 		// Release all semaphores that the command queue associated to the fence waited on the last time it was submitted.
 		LocalVector<Pair<Fence *, uint32_t>> &pairs = fence->queue_signaled_from->image_semaphores_for_fences;
 		uint32_t i = 0;
@@ -3243,17 +3244,33 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 
 	thread_local LocalVector<VkSemaphore> wait_semaphores;
 	thread_local LocalVector<VkPipelineStageFlags> wait_semaphores_stages;
+	thread_local LocalVector<SwapChainAcquisition> acquisitions;
 	wait_semaphores.clear();
 	wait_semaphores_stages.clear();
+	acquisitions.clear();
 
-	if (!command_queue->pending_semaphores_for_execute.is_empty()) {
-		for (uint32_t i = 0; i < command_queue->pending_semaphores_for_execute.size(); i++) {
-			VkSemaphore wait_semaphore = command_queue->image_semaphores[command_queue->pending_semaphores_for_execute[i]];
-			wait_semaphores.push_back(wait_semaphore);
-			wait_semaphores_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+	// Take the oldest acquisition of every chain this call presents. Acquires and presents are in
+	// the same order by construction (a frame acquires while it records and presents when it is
+	// submitted, and frames are submitted in order), so the front of the queue is this frame's.
+	{
+		MutexLock acquisition_lock(swap_chain_acquisition_mutex);
+		for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
+			SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
+			if (swap_chain->pending_acquisitions.is_empty()) {
+				acquisitions.push_back(SwapChainAcquisition());
+				continue;
+			}
+			acquisitions.push_back(swap_chain->pending_acquisitions[0]);
+			swap_chain->pending_acquisitions.remove_at(0);
 		}
+	}
 
-		command_queue->pending_semaphores_for_execute.clear();
+	for (uint32_t i = 0; i < acquisitions.size(); i++) {
+		if (acquisitions[i].command_queue == nullptr) {
+			continue;
+		}
+		wait_semaphores.push_back(command_queue->image_semaphores[acquisitions[i].semaphore_index]);
+		wait_semaphores_stages.push_back(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 	}
 
 	for (uint32_t i = 0; i < p_wait_semaphores.size(); i++) {
@@ -3293,7 +3310,7 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 
 		for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 			const SwapChain *swap_chain = (const SwapChain *)(p_swap_chains[i].id);
-			VkSemaphore semaphore = swap_chain->present_semaphores[swap_chain->image_index];
+			VkSemaphore semaphore = swap_chain->present_semaphores[acquisitions[i].image_index];
 			present_semaphores.push_back(semaphore);
 			signal_semaphores.push_back(semaphore);
 		}
@@ -3318,15 +3335,16 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		}
 		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FAILED, vformat("Couldn't submit to Vulkan queue (VkResult error %d).", err));
 
-		if (fence != nullptr && !command_queue->pending_semaphores_for_fence.is_empty()) {
-			fence->queue_signaled_from = command_queue;
-
+		if (fence != nullptr && !acquisitions.is_empty()) {
+			MutexLock acquisition_lock(swap_chain_acquisition_mutex);
 			// Indicate to the fence that it should release the semaphores that were waited on this submission the next time the fence is waited on.
-			for (uint32_t i = 0; i < command_queue->pending_semaphores_for_fence.size(); i++) {
-				command_queue->image_semaphores_for_fences.push_back({ fence, command_queue->pending_semaphores_for_fence[i] });
+			for (uint32_t i = 0; i < acquisitions.size(); i++) {
+				if (acquisitions[i].command_queue == nullptr) {
+					continue;
+				}
+				fence->queue_signaled_from = command_queue;
+				command_queue->image_semaphores_for_fences.push_back({ fence, acquisitions[i].semaphore_index });
 			}
-
-			command_queue->pending_semaphores_for_fence.clear();
 		}
 
 		if (!present_semaphores.is_empty()) {
@@ -3345,8 +3363,8 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 			SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
 			swapchains.push_back(swap_chain->vk_swapchain);
-			DEV_ASSERT(swap_chain->image_index < swap_chain->images.size());
-			image_indices.push_back(swap_chain->image_index);
+			DEV_ASSERT(acquisitions[i].image_index < swap_chain->images.size());
+			image_indices.push_back(acquisitions[i].image_index);
 		}
 
 		results.resize(swapchains.size());
@@ -3377,7 +3395,6 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		bool any_result_is_out_of_date = false;
 		for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 			SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
-			swap_chain->image_index = UINT_MAX;
 			if (results[i] == VK_ERROR_OUT_OF_DATE_KHR) {
 				context_driver->surface_set_needs_resize(swap_chain->surface, true);
 				any_result_is_out_of_date = true;
@@ -3700,6 +3717,7 @@ void RenderingDeviceDriverVulkan::_swap_chain_release(SwapChain *swap_chain) {
 
 	swap_chain->command_queues_acquired.clear();
 	swap_chain->command_queues_acquired_semaphores.clear();
+	swap_chain->pending_acquisitions.clear();
 
 	for (VkSemaphore semaphore : swap_chain->present_semaphores) {
 		vkDestroySemaphore(vk_device, semaphore, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SEMAPHORE));
@@ -4049,6 +4067,7 @@ RDD::FramebufferID RenderingDeviceDriverVulkan::swap_chain_acquire_framebuffer(C
 	VkResult err;
 	VkSemaphore semaphore = VK_NULL_HANDLE;
 	uint32_t semaphore_index = 0;
+	MutexLock acquisition_lock(swap_chain_acquisition_mutex);
 	if (command_queue->free_image_semaphores.is_empty()) {
 		// Add a new semaphore if none are free.
 		VkSemaphoreCreateInfo create_info = {};
@@ -4072,7 +4091,8 @@ RDD::FramebufferID RenderingDeviceDriverVulkan::swap_chain_acquire_framebuffer(C
 	swap_chain->command_queues_acquired.push_back(command_queue);
 	swap_chain->command_queues_acquired_semaphores.push_back(semaphore_index);
 
-	err = device_functions.AcquireNextImageKHR(vk_device, swap_chain->vk_swapchain, UINT64_MAX, semaphore, VK_NULL_HANDLE, &swap_chain->image_index);
+	uint32_t image_index = 0;
+	err = device_functions.AcquireNextImageKHR(vk_device, swap_chain->vk_swapchain, UINT64_MAX, semaphore, VK_NULL_HANDLE, &image_index);
 	if (err == VK_ERROR_OUT_OF_DATE_KHR) {
 		// Out of date leaves the semaphore in a signaled state that will never finish, so it's necessary to recreate it.
 		bool semaphore_recreated = _recreate_image_semaphore(command_queue, semaphore_index, true);
@@ -4087,13 +4107,13 @@ RDD::FramebufferID RenderingDeviceDriverVulkan::swap_chain_acquire_framebuffer(C
 		return FramebufferID();
 	}
 
-	// Indicate the command queue should wait on these semaphores on the next submission and that it should
-	// indicate they're free again on the next fence.
-	command_queue->pending_semaphores_for_execute.push_back(semaphore_index);
-	command_queue->pending_semaphores_for_fence.push_back(semaphore_index);
+	// The submit that presents this chain consumes this acquisition: it waits on the semaphore,
+	// signals and presents this image index, and releases the semaphore on its fence.
+	swap_chain->image_index = image_index;
+	swap_chain->pending_acquisitions.push_back({ command_queue, semaphore_index, image_index });
 
 	// Return the corresponding framebuffer to the new current image.
-	FramebufferID framebuffer_id = swap_chain->framebuffers[swap_chain->image_index];
+	FramebufferID framebuffer_id = swap_chain->framebuffers[image_index];
 	Framebuffer *framebuffer = (Framebuffer *)(framebuffer_id.id);
 	framebuffer->swap_chain_acquired = true;
 	return framebuffer_id;

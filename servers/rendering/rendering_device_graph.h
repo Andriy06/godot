@@ -897,7 +897,11 @@ public:
 	~RenderingDeviceGraph();
 	void initialize(RDD *p_driver, RenderPassCreationFunction p_render_pass_creation_function, uint32_t p_frame_count, RDD::CommandQueueFamilyID p_secondary_command_queue_family, uint32_t p_secondary_command_buffers_per_frame);
 	void finalize();
-	void begin();
+	// `p_tracking_frame` must be a value never used before by any graph that shares these
+	// resource trackers: the trackers store it to tell "already seen this recording pass" from
+	// "left over from an earlier one". With two graphs alternating (the split draw) the counter
+	// lives in RenderingDevice, not in the graph.
+	void begin(int64_t p_tracking_frame);
 	void add_blas_build(RDD::AccelerationStructureID p_blas, RDD::BufferID p_scratch_buffer, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers);
 	void add_tlas_build(RDD::AccelerationStructureID p_tlas, RDD::BufferID p_scratch_buffer, RDD::BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers);
 	void add_buffer_clear(RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, uint32_t p_offset, uint32_t p_size);

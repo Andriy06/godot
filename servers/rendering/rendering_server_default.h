@@ -85,6 +85,27 @@ class RenderingServerDefault : public RenderingServer {
 #ifdef MACRAME_ENABLED
 	// Phase 1: staged commands into one guarded renderer; the draw is an async write task.
 	mutable MacrameCommandQueue<RenderGrantToken> command_queue{ "renderer", &MacrameRender::holds_grant };
+
+	// The split draw. The renderer's guarded object covers the recording side (scene update,
+	// culling, render lists, the commands recorded into one of the device's two graphs); this
+	// second guarded object covers the device side (the frame slot being replayed into a command
+	// buffer, submitted and presented). The render task hands the recorded frame over as one
+	// opaque value and launches the device task on this object, so frame N's submit overlaps
+	// frame N+1's recording. Ordering: the device tasks are FIFO on this object, each is launched
+	// by the render task that recorded its frame, and the main thread joins the device task whose
+	// frame slot the next render task is about to reuse.
+	mutable ts::Guarded<RenderDeviceGrantToken> device_guarded{ ts::Named{ "render-device" } };
+	ts::Task<void> submit_tasks[2];
+	bool submit_valid[2] = { false, false };
+	uint64_t draw_seq = 0;
+	bool split_draw = false;
+	bool split_inline = false; // Diagnostic: stage the frame but submit it on the render task.
+	static std::atomic<int> submits_in_flight;
+
+	void _join_submit_slot(int p_slot);
+	void _join_all_submits();
+	static void _join_submits_static();
+	static bool _submits_busy_static();
 #else
 	mutable CommandQueueMT command_queue;
 #endif
@@ -98,7 +119,9 @@ class RenderingServerDefault : public RenderingServer {
 	void _thread_exit();
 	void _thread_loop();
 
-	void _draw(bool p_swap_buffers, double frame_step);
+	// `p_submit_slot` >= 0 runs the split draw: record the frame, then hand it to a device task
+	// launched into `submit_tasks[p_submit_slot]` instead of submitting inline.
+	void _draw(bool p_swap_buffers, double frame_step, int p_submit_slot);
 	void _run_post_draw_steps();
 	void _init();
 	void _finish();

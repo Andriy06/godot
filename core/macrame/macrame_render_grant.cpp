@@ -41,6 +41,7 @@
 #endif
 
 thread_local bool macrame_tls_holds_render_grant = false;
+thread_local bool macrame_tls_holds_render_device_grant = false;
 thread_local bool macrame_tls_holds_physics_grant = false;
 
 MACRAME_NO_INLINE void MacramePhysics::set_holds_grant(bool p_holds) {
@@ -63,6 +64,10 @@ MACRAME_NO_INLINE void MacrameRender::set_holds_grant(bool p_holds) {
 	macrame_tls_holds_render_grant = p_holds;
 }
 
+MACRAME_NO_INLINE void MacrameRenderDevice::set_holds_grant(bool p_holds) {
+	macrame_tls_holds_render_device_grant = p_holds;
+}
+
 namespace {
 bool (*render_access_query)() = nullptr;
 RenderGrantToken *render_token = nullptr;
@@ -77,7 +82,7 @@ void MacrameRender::set_token(RenderGrantToken *p_token) {
 }
 
 bool MacrameRender::check_access() {
-	if (macrame_tls_holds_render_grant) {
+	if (macrame_tls_holds_render_grant || macrame_tls_holds_render_device_grant) {
 		return true;
 	}
 	if (!render_access_query) {

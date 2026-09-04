@@ -50,6 +50,7 @@ struct RenderGrantToken {
 };
 
 extern thread_local bool macrame_tls_holds_render_grant;
+extern thread_local bool macrame_tls_holds_render_device_grant;
 extern thread_local bool macrame_tls_holds_physics_grant;
 
 namespace MacrameRender {
@@ -66,6 +67,22 @@ void set_access_query(bool (*p_query)());
 void set_token(RenderGrantToken *p_token);
 bool check_access();
 } // namespace MacrameRender
+
+// The split draw's second guarded object: the device side of the renderer (the frame slot being
+// submitted, the graph being replayed, the queue). The render task records frame N+1 while the
+// device task submits frame N, so the two hold different grants and the harness keeps everyone
+// else out of both. RenderingDevice's thread guards accept either, because the split is by
+// construction (the device task only calls the submit path) rather than by guard placement.
+struct RenderDeviceGrantToken {
+	int unused = 0;
+};
+
+namespace MacrameRenderDevice {
+inline bool holds_grant() {
+	return macrame_tls_holds_render_device_grant;
+}
+void set_holds_grant(bool p_holds);
+} // namespace MacrameRenderDevice
 
 struct PhysicsGrantToken {
 	int unused = 0;

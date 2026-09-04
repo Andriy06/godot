@@ -84,6 +84,16 @@ public:
 	virtual bool is_opengl() = 0;
 	virtual void gl_end_frame(bool p_swap_buffers) = 0;
 	virtual void end_frame(bool p_present) = 0;
+
+	// The split draw (Macrame). A compositor that supports it lets the frame's recording and the
+	// frame's submission run as two tasks: `begin_record_frame()` opens the next slot for
+	// recording, `stage_submit()` closes the recorded frame and returns an opaque handle naming
+	// it, and `submit_staged()` replays and submits that handle from the other task. The default
+	// implementation reports no support and `end_frame()` keeps doing both.
+	virtual bool supports_split_submit() const { return false; }
+	virtual uint64_t stage_submit() { return 0; }
+	virtual void submit_staged(uint64_t p_staged, bool p_present) {}
+
 	virtual void finalize() = 0;
 	virtual uint64_t get_frame_number() const = 0;
 	virtual double get_frame_delta_time() const = 0;

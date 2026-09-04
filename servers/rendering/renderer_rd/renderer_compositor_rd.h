@@ -141,6 +141,13 @@ public:
 	virtual bool is_opengl() override { return false; }
 	virtual void gl_end_frame(bool p_swap_buffers) override {}
 	virtual void end_frame(bool p_present) override;
+
+#ifdef MACRAME_ENABLED
+	virtual bool supports_split_submit() const override;
+	virtual uint64_t stage_submit() override;
+	virtual void submit_staged(uint64_t p_staged, bool p_present) override;
+#endif
+
 	virtual void finalize() override;
 
 	_ALWAYS_INLINE_ virtual uint64_t get_frame_number() const override { return frame; }

@@ -89,6 +89,12 @@ class MacrameCommandQueue {
 	ts::Task<void> queued; // A younger task, FIFO behind `in_flight` (pipelined launches only).
 	bool has_queued = false;
 	bool (*holds_grant)() = nullptr;
+	// The split draw launches a second task (the device submit) from inside the body this queue
+	// runs. That task is not on this object, so the queue has to be told how to join it and how to
+	// ask whether it is still running, or a blue thread would take the direct path while the
+	// device task is still submitting.
+	void (*downstream_join)() = nullptr;
+	bool (*downstream_busy)() = nullptr;
 
 	void _settle_commits() {
 		for (Journal *j : { &journal_a, &journal_b }) {
@@ -112,6 +118,9 @@ class MacrameCommandQueue {
 				has_queued = false;
 			}
 			_settle_commits();
+		}
+		if (downstream_join) {
+			downstream_join(); // Every body has run, so every downstream task has been launched.
 		}
 	}
 
@@ -158,6 +167,16 @@ public:
 
 	ts::Guarded<Token> &get_guarded() { return guarded; }
 
+	// See `downstream_join` / `downstream_busy`.
+	void set_downstream(void (*p_join)(), bool (*p_busy)()) {
+		downstream_join = p_join;
+		downstream_busy = p_busy;
+	}
+
+	// Leave at most one body outstanding on this object, so the caller of the next launch knows
+	// the body two launches back has finished (and therefore published whatever it staged).
+	void wait_oldest() { _wait_oldest(); }
+
 	// Record a member call for the next apply. Arguments are copied (decayed) like
 	// `CommandQueueMT` does, so RIDs, Variants and containers are safe to hand over.
 	template <typename T, typename M, typename... Args>
@@ -198,7 +217,13 @@ public:
 	// Whether the caller may touch the object directly: it holds the grant, or it is a blue
 	// thread (not a worker) with no task in flight. Wrappers stage otherwise.
 	bool may_call_direct() const {
-		return holds_grant() || (ts::current_worker_index() < 0 && !has_in_flight && !has_queued && !MacrameScene::in_shard_task());
+		if (holds_grant()) {
+			return true;
+		}
+		if (downstream_busy && downstream_busy()) {
+			return false;
+		}
+		return ts::current_worker_index() < 0 && !has_in_flight && !has_queued && !MacrameScene::in_shard_task();
 	}
 
 	// Before a direct call from a blue thread: join the in-flight task and apply what was
@@ -274,7 +299,7 @@ public:
 	template <typename TaskID>
 	void set_pump_task_id(TaskID) {}
 
-	bool is_in_flight() const { return has_in_flight || has_queued; }
+	bool is_in_flight() const { return has_in_flight || has_queued || (downstream_busy && downstream_busy()); }
 	void wait() { _wait_in_flight(); }
 };
 

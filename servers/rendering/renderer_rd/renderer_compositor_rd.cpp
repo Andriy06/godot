@@ -137,6 +137,20 @@ void RendererCompositorRD::end_frame(bool p_present) {
 	RD::get_singleton()->swap_buffers(p_present);
 }
 
+#ifdef MACRAME_ENABLED
+bool RendererCompositorRD::supports_split_submit() const {
+	return RD::get_singleton()->macrame_split_supported();
+}
+
+uint64_t RendererCompositorRD::stage_submit() {
+	return RD::get_singleton()->macrame_stage_submit();
+}
+
+void RendererCompositorRD::submit_staged(uint64_t p_staged, bool p_present) {
+	RD::get_singleton()->macrame_submit_staged(p_staged, p_present);
+}
+#endif
+
 void RendererCompositorRD::initialize() {
 	{
 		// Initialize blit

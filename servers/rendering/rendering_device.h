@@ -1738,7 +1738,7 @@ private:
 	void _check_transfer_worker_texture(Texture *p_texture);
 	void _check_transfer_worker_vertex_array(VertexArray *p_vertex_array);
 	void _check_transfer_worker_index_array(IndexArray *p_index_array);
-	void _submit_transfer_workers(RDD::CommandBufferID p_draw_command_buffer = RDD::CommandBufferID());
+	void _submit_transfer_workers(uint32_t p_frame, RDD::CommandBufferID p_draw_command_buffer = RDD::CommandBufferID());
 	void _submit_transfer_barriers(RDD::CommandBufferID p_draw_command_buffer);
 	void _wait_for_transfer_workers();
 	void _free_transfer_workers();
@@ -1757,7 +1757,18 @@ private:
 	bool _dependencies_make_mutable_recursive(RID p_id, RDG::ResourceTracker *p_resource_tracker);
 	bool _dependencies_make_mutable(RID p_id, RDG::ResourceTracker *p_resource_tracker);
 
-	RenderingDeviceGraph draw_graph;
+	// One graph per frame slot when the draw is split: the render task records into the slot's
+	// graph while the device task replays another slot's graph into its command buffer and submits
+	// it. `draw_graph` always points at the recording one; `graph_tracking_frame` is the counter
+	// they share so the resource trackers can tell one recording pass from the next (see
+	// RenderingDeviceGraph::begin). Without the split there is one graph and one slot in use.
+	static constexpr uint32_t MAX_FRAME_GRAPHS = 4;
+	RenderingDeviceGraph draw_graphs[MAX_FRAME_GRAPHS];
+	RenderingDeviceGraph *draw_graph = &draw_graphs[0];
+	uint32_t draw_graph_index = 0;
+	uint32_t draw_graph_count = 1;
+	bool split_draw_frames = false; // Set in initialize(): one graph per frame slot, three slots.
+	int64_t graph_tracking_frame = 0;
 
 #ifdef DEBUG_ENABLED
 	bool draw_graph_reorder_commands = true;
@@ -1886,15 +1897,19 @@ private:
 	SafeNumeric<uint64_t> buffer_memory;
 
 protected:
-	void execute_chained_cmds(bool p_present_swap_chain,
+	void execute_chained_cmds(uint32_t p_frame, bool p_present_swap_chain,
 			RenderingDeviceDriver::FenceID p_draw_fence,
 			RenderingDeviceDriver::SemaphoreID p_dst_draw_semaphore_to_signal);
 
 public:
 	void _free_internal(RID p_id);
+	void _check_no_open_lists();
 	void _begin_frame(bool p_presented = false);
-	void _end_frame();
-	void _execute_frame(bool p_present);
+	// The frame slot and the graph are explicit: with the split draw the frame being submitted is
+	// not the frame being recorded.
+	void _end_frame(uint32_t p_frame, RenderingDeviceGraph &p_graph);
+	void _execute_frame(uint32_t p_frame, bool p_present);
+	void _advance_record_frame();
 	void _stall_for_frame(uint32_t p_frame);
 	void _stall_for_previous_frames();
 	void _flush_and_stall_for_all_frames(bool p_begin_frame = true);
@@ -1938,6 +1953,22 @@ public:
 	uint64_t limit_get(Limit p_limit) const;
 
 	void swap_buffers(bool p_present);
+
+#ifdef MACRAME_ENABLED
+	// The split draw. `macrame_stage_submit()` closes the frame the render task recorded and hands
+	// back an opaque handle naming (frame slot, graph); the device task passes it to
+	// `macrame_submit_staged()`, which replays the graph into the slot's command buffer, submits
+	// and presents. `macrame_begin_record_frame()` opens the next slot for recording at the top of
+	// the next render task, so the two overlap.
+	// The split draw needs the frame's acquire and its submit to be values that travel with the
+	// frame rather than queue-wide state. That holds when the presentation queue is the main queue
+	// (see the Vulkan driver's SwapChainAcquisition); with a separate present queue the acquire
+	// semaphore would have to be waited on by a submit that does not list the swap chain, so the
+	// split is refused and the draw stays one task.
+	bool macrame_split_supported() const { return split_draw_frames && main_queue == present_queue; }
+	uint64_t macrame_stage_submit();
+	void macrame_submit_staged(uint64_t p_staged, bool p_present);
+#endif
 
 	uint32_t get_frame_delay() const;
 

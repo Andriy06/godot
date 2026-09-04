@@ -75,7 +75,33 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 	frame_drawn_callbacks.push_back(p_callable);
 }
 
-void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
+#ifdef MACRAME_ENABLED
+std::atomic<int> RenderingServerDefault::submits_in_flight{ 0 };
+
+void RenderingServerDefault::_join_submit_slot(int p_slot) {
+	if (submit_valid[p_slot]) {
+		GodotProfileZone("MacrameCommandQueue: wait for oldest submit");
+		submit_tasks[p_slot].sync();
+		submit_valid[p_slot] = false;
+	}
+}
+
+void RenderingServerDefault::_join_all_submits() {
+	for (int i = 0; i < 2; i++) {
+		_join_submit_slot(i);
+	}
+}
+
+void RenderingServerDefault::_join_submits_static() {
+	static_cast<RenderingServerDefault *>(RenderingServer::get_singleton())->_join_all_submits();
+}
+
+bool RenderingServerDefault::_submits_busy_static() {
+	return submits_in_flight.load(std::memory_order_acquire) != 0;
+}
+#endif
+
+void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, int p_submit_slot) {
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
 
@@ -114,7 +140,36 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 	RSG::canvas_render->update();
 
 	GodotProfileZoneGrouped(_profile_zone, "rasterizer->end_frame");
+#ifdef MACRAME_ENABLED
+	if (p_submit_slot >= 0) {
+		// Close the recorded frame and hand it to the device task. Everything the device task
+		// touches (that frame slot, that graph, the queue) is disjoint from what the next render
+		// task will touch, so the two run at the same time.
+		const uint64_t staged = RSG::rasterizer->stage_submit();
+		if (split_inline) {
+			// Diagnostic (MACRAME_SPLIT_INLINE=1): the same staged hand-off, submitted on this task
+			// instead of the device task, so a fault can be attributed to the split of the state or
+			// to the concurrency.
+			RSG::rasterizer->submit_staged(staged, p_swap_buffers);
+		} else {
+			submits_in_flight.fetch_add(1, std::memory_order_relaxed);
+			submit_tasks[p_submit_slot] = device_guarded.async([staged, p_swap_buffers](RenderDeviceGrantToken &) {
+				MacrameRenderDevice::set_holds_grant(true);
+				MacrameRuntime::long_task_begin();
+				RSG::rasterizer->submit_staged(staged, p_swap_buffers);
+				MacrameRuntime::long_task_end();
+				MacrameRenderDevice::set_holds_grant(false);
+				submits_in_flight.fetch_sub(1, std::memory_order_release);
+			},
+					{ .priority = ts::Priority::high, .name = "render-submit" });
+			submit_valid[p_submit_slot] = true;
+		}
+	} else {
+		RSG::rasterizer->end_frame(p_swap_buffers);
+	}
+#else
 	RSG::rasterizer->end_frame(p_swap_buffers);
+#endif
 
 #ifndef XR_DISABLED
 	if (xr_server != nullptr) {
@@ -276,6 +331,12 @@ void RenderingServerDefault::_init() {
 	RSG::fog = RSG::rasterizer->get_fog();
 	RSG::canvas_render = RSG::rasterizer->get_canvas();
 	sr->set_scene_render(RSG::rasterizer->get_scene());
+#ifdef MACRAME_ENABLED
+	// MACRAME_SPLIT_DRAW=0 runs the draw as one task again (the frame's submit inline), for A/B.
+	split_draw = RSG::rasterizer->supports_split_submit() && OS::get_singleton()->get_environment("MACRAME_SPLIT_DRAW") != "0";
+	split_inline = OS::get_singleton()->get_environment("MACRAME_SPLIT_INLINE") == "1";
+	print_verbose(split_draw ? "Macrame: split draw enabled (record task + device submit task)" : "Macrame: split draw disabled");
+#endif
 }
 
 void RenderingServerDefault::_finish() {
@@ -497,19 +558,29 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	// Pipelined: this frame's batch and its draw queue behind the draw still running, and the
 	// main thread goes on to the next frame; it waits only when it is a whole frame ahead.
 	MacrameRenderSnapshot::publish(); // Outputs of the draws that completed become the version the next frame reads.
-	command_queue.launch_pipelined([this, p_present, frame_step](RenderGrantToken &) {
+	int submit_slot = -1;
+	if (split_draw) {
+		// Leave one render body outstanding, so the body two launches back has finished and the
+		// device task it launched exists; then join that device task, because the frame slot it
+		// owns is the one the body launched below will record into.
+		command_queue.wait_oldest();
+		submit_slot = int(draw_seq & 1);
+		_join_submit_slot(submit_slot);
+		draw_seq++;
+	}
+	command_queue.launch_pipelined([this, p_present, frame_step, submit_slot](RenderGrantToken &) {
 		MacrameRender::set_holds_grant(true);
 		MacrameRuntime::long_task_begin();
-		_draw(p_present, frame_step);
+		_draw(p_present, frame_step, submit_slot);
 		MacrameRuntime::long_task_end();
 		MacrameRender::set_holds_grant(false);
 	}, "render", ts::Priority::high);
 	return;
 #endif
 	if (create_thread) {
-		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step);
+		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step, -1);
 	} else {
-		_draw(p_present, frame_step);
+		_draw(p_present, frame_step, -1);
 	}
 }
 
@@ -537,6 +608,9 @@ RenderingServerDefault::RenderingServerDefault(bool p_create_thread) {
 	MacrameRender::set_access_query([]() {
 		return static_cast<RenderingServerDefault *>(RenderingServer::get_singleton())->command_queue.may_call_direct();
 	});
+	// The device tasks the draw launches are not on the render queue's object; teach it to join
+	// them and to report them busy, so a blue thread never takes the direct path mid-submit.
+	command_queue.set_downstream(&RenderingServerDefault::_join_submits_static, &RenderingServerDefault::_submits_busy_static);
 #endif
 }
 
