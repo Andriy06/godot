@@ -35,6 +35,7 @@
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/macrame/macrame_render_grant.h"
 #include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
@@ -53,9 +54,18 @@
 #define FORCE_SEPARATE_PRESENT_QUEUE 0
 #define PRINT_FRAMEBUFFER_FORMAT 0
 
+#ifdef MACRAME_ENABLED
+// The render thread is a grant, not a thread id: the guard asks the Macrame harness whether
+// the caller holds it (or may call directly). Note that with THREADS_ENABLED off the
+// thread-id form below is inert (get_caller_id() always reports the main thread).
+#define ERR_RENDER_THREAD_MSG String("This function (") + String(__func__) + String(") can only be called under the renderer's grant (the draw task) or with no draw in flight. ")
+#define ERR_RENDER_THREAD_GUARD() ERR_FAIL_COND_MSG(!MacrameRender::check_access(), ERR_RENDER_THREAD_MSG);
+#define ERR_RENDER_THREAD_GUARD_V(m_ret) ERR_FAIL_COND_V_MSG(!MacrameRender::check_access(), (m_ret), ERR_RENDER_THREAD_MSG);
+#else
 #define ERR_RENDER_THREAD_MSG String("This function (") + String(__func__) + String(") can only be called from the render thread. ")
 #define ERR_RENDER_THREAD_GUARD() ERR_FAIL_COND_MSG(render_thread_id != Thread::get_caller_id(), ERR_RENDER_THREAD_MSG);
 #define ERR_RENDER_THREAD_GUARD_V(m_ret) ERR_FAIL_COND_V_MSG(render_thread_id != Thread::get_caller_id(), (m_ret), ERR_RENDER_THREAD_MSG);
+#endif
 
 /**************************/
 /**** HELPER FUNCTIONS ****/

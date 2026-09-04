@@ -525,6 +525,14 @@ RenderingServerDefault::RenderingServerDefault(bool p_create_thread) {
 	RenderingServer::init();
 
 	create_thread = p_create_thread;
+
+#ifdef MACRAME_ENABLED
+	// Hand the renderer's token and the direct-mode query to RenderingDevice's thread guards.
+	command_queue.get_guarded().access([](RenderGrantToken &p_token) { MacrameRender::set_token(&p_token); }).sync();
+	MacrameRender::set_access_query([]() {
+		return static_cast<RenderingServerDefault *>(RenderingServer::get_singleton())->command_queue.may_call_direct();
+	});
+#endif
 }
 
 RenderingServerDefault::~RenderingServerDefault() {

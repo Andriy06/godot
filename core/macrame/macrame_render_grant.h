@@ -44,8 +44,8 @@ class Guarded;
 // suspend, but the discipline costs nothing).
 
 struct RenderGrantToken {
-	// Placeholder for the renderer's guarded identity. Phase 2 moves `TS_CHECK_ACCESS()` into
-	// the server entry points against this object.
+	// The renderer's guarded identity: RenderingDevice's thread guards check the calling task's
+	// grants against this object (`MacrameRender::check_access`).
 	int unused = 0;
 };
 
@@ -57,6 +57,14 @@ inline bool holds_grant() {
 	return macrame_tls_holds_render_grant;
 }
 void set_holds_grant(bool p_holds);
+
+// The harness behind RenderingDevice's thread guards. True when the caller holds the render
+// grant (the draw body) or may touch the renderer directly (a blue thread with no draw in
+// flight, as the server's query reports); otherwise Macrame checks the running task's grants
+// against the renderer's token and faults with its own diagnostics.
+void set_access_query(bool (*p_query)());
+void set_token(RenderGrantToken *p_token);
+bool check_access();
 } // namespace MacrameRender
 
 struct PhysicsGrantToken {

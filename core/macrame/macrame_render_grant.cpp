@@ -30,6 +30,10 @@
 
 #include "macrame_render_grant.h"
 
+#ifdef MACRAME_ENABLED
+#include "ts/access.h"
+#endif
+
 #if defined(_MSC_VER) && !defined(__clang__)
 #define MACRAME_NO_INLINE __declspec(noinline)
 #else
@@ -57,4 +61,38 @@ ts::Guarded<PhysicsGrantToken> *MacramePhysics::get_guarded() {
 
 MACRAME_NO_INLINE void MacrameRender::set_holds_grant(bool p_holds) {
 	macrame_tls_holds_render_grant = p_holds;
+}
+
+namespace {
+bool (*render_access_query)() = nullptr;
+RenderGrantToken *render_token = nullptr;
+} // namespace
+
+void MacrameRender::set_access_query(bool (*p_query)()) {
+	render_access_query = p_query;
+}
+
+void MacrameRender::set_token(RenderGrantToken *p_token) {
+	render_token = p_token;
+}
+
+bool MacrameRender::check_access() {
+	if (macrame_tls_holds_render_grant) {
+		return true;
+	}
+	if (!render_access_query) {
+		// Before the render server registers (RenderingDevice::initialize runs first, on the main
+		// thread) there is no draw to conflict with: a blue thread may call directly.
+		return true;
+	}
+	if (render_access_query()) {
+		return true; // Direct mode: a blue thread, nothing in flight.
+	}
+#ifdef MACRAME_ENABLED
+	if (render_token) {
+		ts::access_check(render_token); // Fatal under TS_SAFETY_CHECKS unless the running task declared the grant.
+		return true;
+	}
+#endif
+	return false;
 }
