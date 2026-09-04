@@ -74,6 +74,9 @@ bool MacrameRuntime::is_enabled() {
 
 int MacrameRuntime::get_worker_count() {
 #ifdef MACRAME_ENABLED
+	if (!ts::scheduler_running()) {
+		return (int)std::thread::hardware_concurrency(); // Before init: what the default config will use.
+	}
 	const uint32_t n = ts::current_scheduler_config().num_workers;
 	return (int)(n == 0 ? std::thread::hardware_concurrency() : n);
 #else

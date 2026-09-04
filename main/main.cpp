@@ -2098,8 +2098,12 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 
 	// Initialize WorkerThreadPool.
 	{
+		// The Macrame scheduler comes up before the worker pool: the pool sizes its group fan-out by it.
+		MacrameRuntime::init(GLOBAL_DEF_RST("threading/macrame/workers", 0));
+
 #ifdef THREADS_ENABLED
-		if (editor || project_manager) {
+
+	if (editor || project_manager) {
 			WorkerThreadPool::get_singleton()->init(-1, 0.75);
 		} else {
 			int worker_threads = GLOBAL_GET("threading/worker_pool/max_threads");
@@ -2110,8 +2114,6 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		WorkerThreadPool::get_singleton()->init(0, 0);
 #endif
 	}
-
-	MacrameRuntime::init(GLOBAL_DEF_RST("threading/macrame/workers", 0));
 
 #ifdef TOOLS_ENABLED
 	if (!project_manager && !editor) {

@@ -184,6 +184,9 @@ private:
 	bool _try_promote_low_priority_task();
 
 	static WorkerThreadPool *singleton;
+#ifdef MACRAME_ENABLED
+	int macrame_group_slots = 1;
+#endif
 
 #ifdef THREADS_ENABLED
 	static const uint32_t MAX_UNLOCKABLE_LOCKS = 2;
@@ -268,7 +271,10 @@ public:
 	void wait_for_group_task_completion(GroupID p_group);
 
 	_FORCE_INLINE_ int get_thread_count() const {
-#ifdef THREADS_ENABLED
+#if defined(MACRAME_ENABLED)
+		// Group tasks fan out through Macrame's parallel_for; callers size per-slot buffers by this.
+		return macrame_group_slots;
+#elif defined(THREADS_ENABLED)
 		return threads.size();
 #else
 		return 1;

@@ -36,6 +36,10 @@
 #include "core/os/os.h"
 #include "core/os/safe_binary_mutex.h"
 #include "core/os/thread_safe.h"
+#ifdef MACRAME_ENABLED
+#include "core/macrame/macrame_runtime.h"
+#include "ts/parallel_for.h"
+#endif
 
 WorkerThreadPool::Task *const WorkerThreadPool::ThreadData::YIELDING = (Task *)1;
 
@@ -93,6 +97,27 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 	if (p_task->group) {
 		// Handling a group
 		bool do_post = false;
+
+#ifdef MACRAME_ENABLED
+		// The pool has no threads of its own: the first task to run a group fans its elements out
+		// through Macrame's parallel_for (chunks inherit the caller's grants; the join is synchronous).
+		if (p_task->group->max > 0 && p_task->group->index.get() == 0) {
+			const uint32_t element_count = p_task->group->max;
+			p_task->group->index.set(element_count);
+			Task *task = p_task;
+			ts::parallel_for((int)element_count, [task](int p_element) {
+				if (task->native_group_func) {
+					task->native_group_func(task->native_func_userdata, (uint32_t)p_element);
+				} else if (task->template_userdata) {
+					task->template_userdata->callback_indexed((uint32_t)p_element);
+				} else {
+					task->callable.call((uint32_t)p_element);
+				}
+			});
+			p_task->group->completed_index.set(element_count);
+			do_post = true;
+		}
+#endif
 
 		while (true) {
 			uint32_t work_index = p_task->group->index.postincrement();
@@ -819,6 +844,9 @@ void WorkerThreadPool::init(int p_thread_count, float p_low_priority_task_ratio)
 	}
 
 	max_low_priority_threads = CLAMP(p_thread_count * p_low_priority_task_ratio, 1, p_thread_count - 1);
+#ifdef MACRAME_ENABLED
+	macrame_group_slots = MAX(1, MacrameRuntime::get_worker_count());
+#endif
 
 	print_verbose(vformat("WorkerThreadPool: %d threads, %d max low-priority.", p_thread_count, max_low_priority_threads));
 
