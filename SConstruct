@@ -931,7 +931,7 @@ else:
 if env["macrame_path"]:
     import pathlib as _pl
     _macrame_root = _pl.Path(env["macrame_path"]).absolute()
-    env.Prepend(CPPPATH=[str(_macrame_root / "include")])
+    env.Prepend(CPPPATH=[str(_macrame_root / "include"), str(_macrame_root / "tools")]) # tools: graph_trace.h (dev-only visualization).
     # These are ODR-load-bearing in Macrame (detect_mismatch); keep them identical in every TU.
     env.Append(CPPDEFINES=["MACRAME_ENABLED", ("TS_SAFETY_CHECKS", 1), ("TS_PROFILING", 1)])
     if env["macrame_rpmalloc_path"]:

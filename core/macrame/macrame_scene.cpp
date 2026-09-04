@@ -42,10 +42,15 @@
 
 #include "ts/access.h"
 #include "ts/guarded.h"
+#include "ts/static_task_graph.h"
 #include "ts/task.h"
 
+#include "graph_trace.h" // Macrame tools: the aggregated runtime trace of a static graph.
+
 #include <atomic>
+#include <cstdio>
 #include <memory>
+#include <string>
 #include <vector>
 
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -56,14 +61,36 @@
 
 namespace {
 
+// Experiment: a scene phase (the physics tick's shards, or the frame's process shards) as a
+// compiled `Static_task_graph` - one node per shard, edges derived from the declared access -
+// with Macrame's aggregated runtime trace attached. The per-run inputs (which groups each
+// shard runs, for which tree, which phase) are plain state the node bodies read: a graph is
+// build-once and its bodies take no run arguments. MACRAME_STATIC_GRAPH=0 selects the
+// dynamic `ts::async` fan-out instead; MACRAME_TRACE_DIR=<dir> writes the DOT dump at
+// compile and the average-run SVGs at shutdown.
+struct PhaseGraph {
+	ts::Static_task_graph graph;
+	ts::tools::Graph_trace trace;
+	std::vector<std::vector<void *>> buckets;
+	SceneTree *tree = nullptr;
+	bool physics = false;
+	bool built = false;
+	uint64_t runs = 0;
+	bool written = false;
+	std::string names[MacrameScene::SHARD_COUNT]; // `ts::Named` keeps the pointer: stable storage.
+};
+
 struct State {
 	std::vector<std::unique_ptr<ts::Guarded<SceneShardToken>>> shards;
+	PhaseGraph physics_graph;
+	PhaseGraph process_graph;
 	std::vector<SceneShardToken *> shard_ptrs; // Stable addresses of the guarded tokens, for the harness.
 	std::unique_ptr<ts::Guarded<SceneShardToken>> main_shard;
 	SceneShardToken *main_ptr = nullptr;
 	std::atomic<int> next_shard{ 0 };
 };
 State *state = nullptr;
+void _write_phase_trace(PhaseGraph &pg);
 
 } // namespace
 
@@ -95,6 +122,16 @@ void MacrameScene::init() {
 }
 
 void MacrameScene::finish() {
+	if (state) {
+		const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
+		if (!dir.is_empty()) {
+			for (PhaseGraph *pg : { &state->physics_graph, &state->process_graph }) {
+				if (pg->built && !pg->written) {
+					_write_phase_trace(*pg);
+				}
+			}
+		}
+	}
 	delete state;
 	state = nullptr;
 }
@@ -143,6 +180,53 @@ void MacrameScene::check_main(const Node *p_node) {
 	ts::access_check(state->main_ptr);
 }
 
+namespace {
+void _write_phase_trace(PhaseGraph &pg) {
+	const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
+	if (dir.is_empty() || !pg.built) {
+		return;
+	}
+	const String path = dir + (pg.physics ? "/macrame_physics_phase_avg.svg" : "/macrame_process_phase_avg.svg");
+	const bool ok = pg.trace.write_SVG(path.utf8().get_data());
+	pg.written = true;
+	print_line(vformat("Macrame: trace of %d runs %s -> %s", (int)pg.runs, ok ? "written" : "FAILED", path));
+	fflush(stdout);
+}
+
+void _build_phase_graph(PhaseGraph &pg, bool p_physics, ts::Guarded<PhysicsGrantToken> *p_space) {
+	pg.physics = p_physics;
+	pg.buckets.resize(MacrameScene::SHARD_COUNT);
+	for (int s = 0; s < MacrameScene::SHARD_COUNT; s++) {
+		pg.names[s] = std::string(p_physics ? "physics shard " : "process shard ") + std::to_string(s);
+		auto body = [&pg, s](const MacrameRenderOutputs &p_render_outputs) {
+			ScriptServer::thread_enter();
+			set_context(s, true);
+			MacrameRenderSnapshot::set_current(&p_render_outputs);
+			for (void *g : pg.buckets[s]) {
+				pg.tree->macrame_process_group(g, pg.physics);
+			}
+			MacrameRenderSnapshot::set_current(nullptr);
+			set_context(-1, false);
+		};
+		if (p_physics) {
+			pg.graph.add_node(ts::Named{ pg.names[s].c_str() },
+					[body](SceneShardToken &, const SceneShardToken &, const PhysicsGrantToken &, const MacrameRenderOutputs &p_render_outputs) { body(p_render_outputs); },
+					*state->shards[s], *state->main_shard, *p_space, MacrameRenderSnapshot::front());
+		} else {
+			pg.graph.add_node(ts::Named{ pg.names[s].c_str() },
+					[body](SceneShardToken &, const SceneShardToken &, const MacrameRenderOutputs &p_render_outputs) { body(p_render_outputs); },
+					*state->shards[s], *state->main_shard, MacrameRenderSnapshot::front());
+		}
+	}
+	const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
+	const String dot = dir.is_empty() ? String() : dir + (p_physics ? "/macrame_physics_phase.dot" : "/macrame_process_phase.dot");
+	pg.graph.compile(dot.is_empty() ? nullptr : dot.utf8().get_data());
+	pg.graph.set_trace(&pg.trace);
+	pg.built = true;
+	print_verbose(vformat("Macrame: %s phase compiled as a static graph (%d nodes).", p_physics ? "physics" : "process", pg.graph.node_count()));
+}
+} // namespace
+
 void MacrameScene::run_groups(SceneTree *p_tree, void **p_groups, int p_group_count, bool p_physics) {
 	ERR_FAIL_NULL(state);
 	ts::Guarded<PhysicsGrantToken> *space = MacramePhysics::get_guarded();
@@ -158,6 +242,24 @@ void MacrameScene::run_groups(SceneTree *p_tree, void **p_groups, int p_group_co
 			continue;
 		}
 		buckets[s].push_back(p_groups[i]);
+	}
+
+	static const bool use_graph = OS::get_singleton()->get_environment("MACRAME_STATIC_GRAPH") != "0";
+	if (use_graph) {
+		PhaseGraph &pg = p_physics ? state->physics_graph : state->process_graph;
+		if (!pg.built) {
+			_build_phase_graph(pg, p_physics, space);
+		}
+		pg.tree = p_tree;
+		pg.physics = p_physics;
+		pg.buckets.swap(buckets);
+		pg.graph.execute().sync(); // One run at a time; the phases are sequential on the main thread.
+		if (++pg.runs == 3000 && !pg.written) {
+			// The average run so far, written mid-run (the benchmark harness kills the process; the
+			// shutdown path is not reached).
+			_write_phase_trace(pg);
+		}
+		return;
 	}
 
 	std::vector<ts::Task<void>> tasks;
