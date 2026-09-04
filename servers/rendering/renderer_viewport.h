@@ -290,6 +290,10 @@ public:
 	virtual void viewport_set_debug_draw(RID p_viewport, RSE::ViewportDebugDraw p_draw);
 
 	void viewport_set_measure_render_time(RID p_viewport, bool p_enable);
+#ifdef MACRAME_ENABLED
+	// Every active viewport's measured times and render info, for the published outputs snapshot.
+	void macrame_collect_outputs(struct MacrameRenderOutputs &r_outputs) const;
+#endif
 	float viewport_get_measured_render_time_cpu(RID p_viewport) const;
 	float viewport_get_measured_render_time_gpu(RID p_viewport) const;
 

@@ -36,6 +36,7 @@
 #ifdef MACRAME_ENABLED
 #include "core/macrame/macrame_command_queue.h"
 #include "core/macrame/macrame_render_grant.h"
+#include "core/macrame/macrame_render_outputs.h"
 #endif
 #include "core/templates/hash_map.h"
 #include "servers/rendering/renderer_canvas_cull.h"
@@ -661,7 +662,21 @@ public:
 	FUNC2(particles_set_fixed_fps, RID, int)
 	FUNC2(particles_set_interpolate, RID, bool)
 	FUNC2(particles_set_fractional_delta, RID, bool)
+#ifdef MACRAME_ENABLED
+	// Published output: with a draw in flight (or from a shard) answer from the snapshot the
+	// last completed frame published instead of a synchronous round trip through the renderer.
+	virtual bool particles_is_inactive(RID p_particles) override {
+		if (RS_ON_SERVER_THREAD) {
+			command_queue.flush_if_pending();
+			return server_name->particles_is_inactive(p_particles);
+		}
+		bool inactive = false;
+		MacrameRenderSnapshot::read([&](const MacrameRenderOutputs &p_outputs) { inactive = p_outputs.inactive_particles.has(p_particles); });
+		return inactive;
+	}
+#else
 	FUNC1R(bool, particles_is_inactive, RID)
+#endif
 	FUNC3(particles_set_trails, RID, bool, float)
 	FUNC2(particles_set_trail_bind_poses, RID, const Vector<Transform3D> &)
 
@@ -823,12 +838,63 @@ public:
 	FUNC1(viewport_set_occlusion_culling_build_quality, RSE::ViewportOcclusionCullingBuildQuality)
 	FUNC2(viewport_set_mesh_lod_threshold, RID, float)
 
+#ifdef MACRAME_ENABLED
+	// Published outputs (see particles_is_inactive).
+	virtual int viewport_get_render_info(RID p_viewport, RSE::ViewportRenderInfoType p_type, RSE::ViewportRenderInfo p_info) override {
+		if (RS_ON_SERVER_THREAD) {
+			command_queue.flush_if_pending();
+			return server_name->viewport_get_render_info(p_viewport, p_type, p_info);
+		}
+		ERR_FAIL_INDEX_V(p_type, RSE::VIEWPORT_RENDER_INFO_TYPE_MAX, -1);
+		ERR_FAIL_INDEX_V(p_info, RSE::VIEWPORT_RENDER_INFO_MAX, -1);
+		int value = 0;
+		MacrameRenderSnapshot::read([&](const MacrameRenderOutputs &p_outputs) {
+			const MacrameRenderOutputs::ViewportStats *stats = p_outputs.viewports.getptr(p_viewport);
+			if (stats) {
+				value = stats->render_info[p_type][p_info];
+			}
+		});
+		return value;
+	}
+#else
 	FUNC3R(int, viewport_get_render_info, RID, RSE::ViewportRenderInfoType, RSE::ViewportRenderInfo)
+#endif
 	FUNC2(viewport_set_debug_draw, RID, RSE::ViewportDebugDraw)
 
 	FUNC2(viewport_set_measure_render_time, RID, bool)
+#ifdef MACRAME_ENABLED
+	virtual double viewport_get_measured_render_time_cpu(RID p_viewport) const override {
+		if (RS_ON_SERVER_THREAD) {
+			command_queue.flush_if_pending();
+			return server_name->viewport_get_measured_render_time_cpu(p_viewport);
+		}
+		double value = 0.0;
+		MacrameRenderSnapshot::read([&](const MacrameRenderOutputs &p_outputs) {
+			const MacrameRenderOutputs::ViewportStats *stats = p_outputs.viewports.getptr(p_viewport);
+			if (stats) {
+				value = stats->time_cpu;
+			}
+		});
+		return value;
+	}
+	virtual double viewport_get_measured_render_time_gpu(RID p_viewport) const override {
+		if (RS_ON_SERVER_THREAD) {
+			command_queue.flush_if_pending();
+			return server_name->viewport_get_measured_render_time_gpu(p_viewport);
+		}
+		double value = 0.0;
+		MacrameRenderSnapshot::read([&](const MacrameRenderOutputs &p_outputs) {
+			const MacrameRenderOutputs::ViewportStats *stats = p_outputs.viewports.getptr(p_viewport);
+			if (stats) {
+				value = stats->time_gpu;
+			}
+		});
+		return value;
+	}
+#else
 	FUNC1RC(double, viewport_get_measured_render_time_cpu, RID)
 	FUNC1RC(double, viewport_get_measured_render_time_gpu, RID)
+#endif
 	FUNC1RC(RID, viewport_find_from_screen_attachment, DisplayServerEnums::WindowID)
 
 	FUNC2(call_set_vsync_mode, DisplayServerEnums::VSyncMode, DisplayServerEnums::WindowID)

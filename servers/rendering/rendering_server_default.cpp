@@ -126,6 +126,18 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 	RSG::canvas->update_visibility_notifiers();
 	RSG::scene->update_visibility_notifiers();
 
+#ifdef MACRAME_ENABLED
+	{
+		// The frame's read-back outputs, staged here under the grant; draw() publishes them on
+		// the main thread once this task is joined.
+		GodotProfileZoneGrouped(_profile_zone, "stage render outputs");
+		MacrameRenderOutputs outputs;
+		outputs.frame = RSG::rasterizer->get_frame_number();
+		RSG::viewport->macrame_collect_outputs(outputs);
+		RSG::particles_storage->macrame_collect_inactive(outputs.inactive_particles);
+		MacrameRenderSnapshot::stage(std::move(outputs));
+	}
+#endif
 	GodotProfileZoneGrouped(_profile_zone, "post_draw_steps");
 #ifdef MACRAME_ENABLED
 	const bool off_main_thread = true; // _draw runs on a worker; post-draw callbacks belong to the main thread.
@@ -481,6 +493,7 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	// The draw runs as an asynchronous write task on the renderer and overlaps the next
 	// frame's simulation; the next sync() joins it. sync() has already applied the batch.
 	command_queue.sync(); // Join the previous draw and apply this frame's staged batch as one write.
+	MacrameRenderSnapshot::publish(); // The joined draw's outputs become the version the next frame reads.
 	command_queue.launch([this, p_present, frame_step](RenderGrantToken &) {
 		MacrameRender::set_holds_grant(true);
 		_draw(p_present, frame_step);

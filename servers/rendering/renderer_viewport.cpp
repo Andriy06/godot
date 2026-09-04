@@ -30,6 +30,8 @@
 
 #include "renderer_viewport.h"
 
+#include "core/macrame/macrame_render_outputs.h"
+
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/math/transform_interpolator.h"
@@ -1593,6 +1595,24 @@ float RendererViewport::viewport_get_measured_render_time_cpu(RID p_viewport) co
 
 	return double(viewport->time_cpu_end - viewport->time_cpu_begin) / 1000.0;
 }
+
+#ifdef MACRAME_ENABLED
+void RendererViewport::macrame_collect_outputs(MacrameRenderOutputs &r_outputs) const {
+	static_assert(MacrameRenderOutputs::RENDER_INFO_TYPES == RSE::VIEWPORT_RENDER_INFO_TYPE_MAX);
+	static_assert(MacrameRenderOutputs::RENDER_INFOS == RSE::VIEWPORT_RENDER_INFO_MAX);
+	for (const Viewport *viewport : active_viewports) {
+		MacrameRenderOutputs::ViewportStats stats;
+		stats.time_cpu = double(viewport->time_cpu_end - viewport->time_cpu_begin) / 1000.0;
+		stats.time_gpu = double((viewport->time_gpu_end - viewport->time_gpu_begin) / 1000) / 1000.0;
+		for (int t = 0; t < RSE::VIEWPORT_RENDER_INFO_TYPE_MAX; t++) {
+			for (int i = 0; i < RSE::VIEWPORT_RENDER_INFO_MAX; i++) {
+				stats.render_info[t][i] = viewport->render_info.info[t][i];
+			}
+		}
+		r_outputs.viewports.insert(viewport->self, stats);
+	}
+}
+#endif // MACRAME_ENABLED
 
 float RendererViewport::viewport_get_measured_render_time_gpu(RID p_viewport) const {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);

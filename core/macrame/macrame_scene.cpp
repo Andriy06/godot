@@ -33,6 +33,7 @@
 #ifdef MACRAME_ENABLED
 
 #include "core/macrame/macrame_render_grant.h"
+#include "core/macrame/macrame_render_outputs.h"
 #include "core/object/script_language.h"
 #include "core/os/os.h"
 #include "core/string/print_string.h"
@@ -167,15 +168,17 @@ void MacrameScene::run_groups(SceneTree *p_tree, void **p_groups, int p_group_co
 		}
 		std::vector<void *> groups = buckets[s];
 		tasks.push_back(ts::async(
-				[p_tree, groups, p_physics, s](SceneShardToken &, const SceneShardToken &, const PhysicsGrantToken &) {
+				[p_tree, groups, p_physics, s](SceneShardToken &, const SceneShardToken &, const PhysicsGrantToken &, const MacrameRenderOutputs &p_render_outputs) {
 					ScriptServer::thread_enter();
 					set_context(s, true);
+					MacrameRenderSnapshot::set_current(&p_render_outputs);
 					for (void *g : groups) {
 						p_tree->macrame_process_group(g, p_physics);
 					}
+					MacrameRenderSnapshot::set_current(nullptr);
 					set_context(-1, false);
 				},
-				*state->shards[s], *state->main_shard, *space));
+				*state->shards[s], *state->main_shard, *space, MacrameRenderSnapshot::front()));
 	}
 	for (ts::Task<void> &t : tasks) {
 		t.sync();

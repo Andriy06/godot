@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include "core/templates/hash_set.h"
+
 #include "core/math/math_defs.h" // real_t
 #include "servers/rendering/rendering_server_enums.h"
 
@@ -89,6 +91,8 @@ public:
 	virtual void particles_set_subemitter(RID p_particles, RID p_subemitter_particles) = 0;
 
 	virtual bool particles_is_inactive(RID p_particles) const = 0;
+	// Every finished particle system, for the published outputs snapshot (Macrame).
+	virtual void macrame_collect_inactive(HashSet<RID> &r_inactive) const {}
 
 	virtual void particles_set_draw_order(RID p_particles, RSE::ParticlesDrawOrder p_order) = 0;
 

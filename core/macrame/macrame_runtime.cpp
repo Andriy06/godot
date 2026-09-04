@@ -30,6 +30,7 @@
 
 #include "macrame_runtime.h"
 
+#include "core/macrame/macrame_render_outputs.h"
 #include "core/macrame/macrame_scene.h"
 
 #include "core/string/print_string.h"
@@ -76,6 +77,7 @@ void MacrameRuntime::init(int p_workers) {
 	request_high_qos();
 	ts::create_scheduler(cfg);
 	MacrameScene::init();
+	MacrameRenderSnapshot::init();
 	print_verbose(vformat("Macrame: scheduler up, %d workers.", get_worker_count()));
 #else
 	(void)p_workers;
@@ -84,6 +86,7 @@ void MacrameRuntime::init(int p_workers) {
 
 void MacrameRuntime::finish() {
 #ifdef MACRAME_ENABLED
+	MacrameRenderSnapshot::finish();
 	MacrameScene::finish();
 	if (ts::scheduler_running()) {
 		ts::destroy_scheduler();

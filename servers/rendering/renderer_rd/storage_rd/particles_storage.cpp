@@ -1736,6 +1736,15 @@ bool ParticlesStorage::particles_is_inactive(RID p_particles) const {
 	return !particles->emitting && particles->inactive;
 }
 
+void ParticlesStorage::macrame_collect_inactive(HashSet<RID> &r_inactive) const {
+	for (const RID &rid : particles_owner.get_owned_list()) {
+		const Particles *particles = particles_owner.get_or_null(rid);
+		if (particles && !particles->emitting && particles->inactive) {
+			r_inactive.insert(rid);
+		}
+	}
+}
+
 /* Particles SHADER */
 
 void ParticlesStorage::ParticlesShaderData::set_code(const String &p_code) {
