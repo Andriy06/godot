@@ -30,6 +30,8 @@
 
 #include "physics_server_3d_wrap_mt.h"
 
+#include "core/macrame/macrame_runtime.h"
+
 #include "core/object/callable_mp.h"
 
 void PhysicsServer3DWrapMT::_assign_mt_ids(WorkerThreadPool::TaskID p_pump_task_id) {
@@ -63,7 +65,9 @@ void PhysicsServer3DWrapMT::step(real_t p_step) {
 	// the render, and the next sync() joins it.
 	command_queue.launch([this, p_step](PhysicsGrantToken &) {
 		MacramePhysics::set_holds_grant(true);
+		MacrameRuntime::long_task_begin();
 		physics_server_3d->step(p_step);
+		MacrameRuntime::long_task_end();
 		MacramePhysics::set_holds_grant(false);
 	}, "physics step");
 	return;

@@ -43,4 +43,9 @@ public:
 	static void finish();
 	static bool is_enabled();
 	static int get_worker_count();
+	// A long serial task (the frame's draw, the physics step) shares the machine with many short
+	// shard tasks; this asks the OS to prefer it when they compete for a fast core. A priority
+	// hint on the calling worker thread, never a pin. MACRAME_TASK_PRIORITY=0 disables.
+	static void long_task_begin();
+	static void long_task_end();
 };

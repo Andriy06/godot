@@ -30,6 +30,8 @@
 
 #include "rendering_server_default.h"
 
+#include "core/macrame/macrame_runtime.h"
+
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
@@ -496,7 +498,9 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	MacrameRenderSnapshot::publish(); // The joined draw's outputs become the version the next frame reads.
 	command_queue.launch([this, p_present, frame_step](RenderGrantToken &) {
 		MacrameRender::set_holds_grant(true);
+		MacrameRuntime::long_task_begin();
 		_draw(p_present, frame_step);
+		MacrameRuntime::long_task_end();
 		MacrameRender::set_holds_grant(false);
 	}, "render");
 	return;

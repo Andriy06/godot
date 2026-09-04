@@ -182,7 +182,14 @@ public:
 
 	RVec3						mShapePositionCOM;							///< Center of mass world position of the shape
 	Quat						mShapeRotation;								///< Rotation of the shape
+#ifdef MACRAME_ENABLED
+	// Macrame fork: queries run under a read grant on the space, so no body's shape can be freed
+	// mid-query. A raw pointer avoids an atomic AddRef/Release on every hit body's shape: in a
+	// crowd that counter is a cache line every querying core writes.
+	const Shape *				mShape = nullptr;							///< The shape itself (not owned)
+#else
 	RefConst<Shape>				mShape;										///< The shape itself
+#endif
 	Float3						mShapeScale { 1, 1, 1 };					///< Not stored as Vec3 to get a nicely packed structure
 	BodyID						mBodyID;									///< Optional body ID from which this shape comes
 	SubShapeIDCreator			mSubShapeIDCreator;							///< Optional sub shape ID creator for the shape (can be used when expanding compound shapes into multiple transformed shapes)

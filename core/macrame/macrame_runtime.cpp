@@ -74,6 +74,12 @@ void MacrameRuntime::init(int p_workers) {
 	if (p_workers > 0) {
 		cfg.num_workers = p_workers;
 	}
+	if (const char *env = std::getenv("MACRAME_WORKERS")) {
+		const int n = atoi(env); // Scaling experiments: override the project setting.
+		if (n > 0) {
+			cfg.num_workers = n;
+		}
+	}
 	request_high_qos();
 	ts::create_scheduler(cfg);
 	MacrameScene::init();
@@ -91,6 +97,26 @@ void MacrameRuntime::finish() {
 	if (ts::scheduler_running()) {
 		ts::destroy_scheduler();
 	}
+#endif
+}
+
+void MacrameRuntime::long_task_begin() {
+#ifdef WINDOWS_ENABLED
+	const char *env = std::getenv("MACRAME_TASK_PRIORITY");
+	if (env && env[0] == '0') {
+		return;
+	}
+	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
+}
+
+void MacrameRuntime::long_task_end() {
+#ifdef WINDOWS_ENABLED
+	const char *env = std::getenv("MACRAME_TASK_PRIORITY");
+	if (env && env[0] == '0') {
+		return;
+	}
+	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
 #endif
 }
 
