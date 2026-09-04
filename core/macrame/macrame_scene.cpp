@@ -64,14 +64,16 @@ struct State {
 };
 State *state = nullptr;
 
-thread_local int tls_current_shard = -1;
-thread_local bool tls_in_shard_task = false;
+} // namespace
 
+thread_local int macrame_tls_current_shard = -1;
+thread_local bool macrame_tls_in_shard_task = false;
+
+namespace {
 MACRAME_NO_INLINE void set_context(int p_shard, bool p_in_task) {
-	tls_current_shard = p_shard;
-	tls_in_shard_task = p_in_task;
+	macrame_tls_current_shard = p_shard;
+	macrame_tls_in_shard_task = p_in_task;
 }
-
 } // namespace
 
 void MacrameScene::init() {
@@ -114,14 +116,6 @@ int active_shard_count() {
 
 int MacrameScene::assign_shard() {
 	return state ? state->next_shard.fetch_add(1) % active_shard_count() : -1;
-}
-
-MACRAME_NO_INLINE int MacrameScene::current_shard() {
-	return tls_current_shard;
-}
-
-MACRAME_NO_INLINE bool MacrameScene::in_shard_task() {
-	return tls_in_shard_task;
 }
 
 void MacrameScene::check_write(const Node *p_node) {
@@ -194,8 +188,8 @@ void MacrameScene::init() {}
 void MacrameScene::finish() {}
 bool MacrameScene::is_enabled() { return false; }
 int MacrameScene::assign_shard() { return -1; }
-int MacrameScene::current_shard() { return -1; }
-bool MacrameScene::in_shard_task() { return false; }
+thread_local int macrame_tls_current_shard = -1;
+thread_local bool macrame_tls_in_shard_task = false;
 void MacrameScene::check_write(const Node *) {}
 void MacrameScene::check_read(const Node *) {}
 void MacrameScene::check_main(const Node *) {}

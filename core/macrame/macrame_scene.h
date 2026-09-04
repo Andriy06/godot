@@ -47,6 +47,9 @@
 // (`call_deferred_thread_group`, `set_deferred_thread_group`); cross-shard reads fault.
 
 class Node;
+
+extern thread_local int macrame_tls_current_shard;
+extern thread_local bool macrame_tls_in_shard_task;
 class SceneTree;
 
 struct SceneShardToken {
@@ -64,8 +67,12 @@ bool is_enabled();
 int assign_shard();
 
 // Thread-local task context (out-of-line accessors, see macrame_render_grant.h).
-int current_shard(); // -1 when not inside a shard task.
-bool in_shard_task();
+inline int current_shard() {
+	return macrame_tls_current_shard; // -1 when not inside a shard task.
+}
+inline bool in_shard_task() {
+	return macrame_tls_in_shard_task;
+}
 
 // Harness entry points used by the node guard macros.
 void check_write(const Node *p_node);

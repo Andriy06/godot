@@ -438,6 +438,10 @@ void Skeleton3D::_notification(int p_what) {
 					E->skeleton_version = version;
 				}
 
+				// Upload the whole pose as one command (one staged closure per skeleton per frame).
+				Vector<Transform3D> pose;
+				pose.resize(bind_count);
+				Transform3D *pose_ptr = pose.ptrw();
 				for (uint32_t i = 0; i < bind_count; i++) {
 					uint32_t bone_index = E->skin_bone_indices_ptrs[i];
 					ERR_CONTINUE(bone_index >= (uint32_t)len);
@@ -445,8 +449,9 @@ void Skeleton3D::_notification(int p_what) {
 					if (bonesptr[bone_index].is_skin_scaled) {
 						bind_pose_transform = bind_pose_transform.scaled(bonesptr[bone_index].skin_scale);
 					}
-					rs->skeleton_bone_set_transform(skeleton, i, bonesptr[bone_index].global_pose * bind_pose_transform);
+					pose_ptr[i] = bonesptr[bone_index].global_pose * bind_pose_transform;
 				}
+				rs->skeleton_bones_set_transforms(skeleton, pose);
 			}
 
 			if (!modifiers.is_empty()) {

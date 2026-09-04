@@ -49,8 +49,13 @@ struct RenderGrantToken {
 	int unused = 0;
 };
 
+extern thread_local bool macrame_tls_holds_render_grant;
+extern thread_local bool macrame_tls_holds_physics_grant;
+
 namespace MacrameRender {
-bool holds_grant();
+inline bool holds_grant() {
+	return macrame_tls_holds_render_grant;
+}
 void set_holds_grant(bool p_holds);
 } // namespace MacrameRender
 
@@ -59,7 +64,9 @@ struct PhysicsGrantToken {
 };
 
 namespace MacramePhysics {
-bool holds_grant();
+inline bool holds_grant() {
+	return macrame_tls_holds_physics_grant;
+}
 void set_holds_grant(bool p_holds);
 // The physics wrapper registers its guarded space here so scene shards can declare a read on it.
 void set_guarded(ts::Guarded<PhysicsGrantToken> *p_guarded);
