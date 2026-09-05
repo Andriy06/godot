@@ -95,8 +95,9 @@ class RenderingServerDefault : public RenderingServer {
 	// by the render task that recorded its frame, and the main thread joins the device task whose
 	// frame slot the next render task is about to reuse.
 	mutable ts::Guarded<RenderDeviceGrantToken> device_guarded{ ts::Named{ "render-device" } };
-	ts::Task<void> submit_tasks[2];
-	bool submit_valid[2] = { false, false };
+	static constexpr int SUBMIT_SLOTS = 4;
+	ts::Task<void> submit_tasks[SUBMIT_SLOTS];
+	bool submit_valid[SUBMIT_SLOTS] = {};
 	uint64_t draw_seq = 0;
 	bool split_draw = false;
 	bool split_inline = false; // Diagnostic: stage the frame but submit it on the render task.

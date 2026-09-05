@@ -142,6 +142,10 @@ bool RendererCompositorRD::supports_split_submit() const {
 	return RD::get_singleton()->macrame_split_supported();
 }
 
+uint32_t RendererCompositorRD::split_frame_ring() const {
+	return RD::get_singleton()->macrame_frame_ring();
+}
+
 uint64_t RendererCompositorRD::stage_submit() {
 	return RD::get_singleton()->macrame_stage_submit();
 }

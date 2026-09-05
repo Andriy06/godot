@@ -92,6 +92,7 @@ public:
 	// implementation reports no support and `end_frame()` keeps doing both.
 	virtual bool supports_split_submit() const { return false; }
 	virtual uint64_t stage_submit() { return 0; }
+	virtual uint32_t split_frame_ring() const { return 1; }
 	virtual void submit_staged(uint64_t p_staged, bool p_present) {}
 
 	virtual void finalize() = 0;

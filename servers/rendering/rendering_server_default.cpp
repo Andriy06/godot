@@ -87,7 +87,7 @@ void RenderingServerDefault::_join_submit_slot(int p_slot) {
 }
 
 void RenderingServerDefault::_join_all_submits() {
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < SUBMIT_SLOTS; i++) {
 		_join_submit_slot(i);
 	}
 }
@@ -564,8 +564,13 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 		// device task it launched exists; then join that device task, because the frame slot it
 		// owns is the one the body launched below will record into.
 		command_queue.wait_oldest();
-		submit_slot = int(draw_seq & 1);
-		_join_submit_slot(submit_slot);
+		// The frame slot the body below records into was last used by the device task `ring` frames
+		// back, where `ring` is the device's frame ring; that one has to be joined. It was launched
+		// a whole frame earlier than the newest joinable one, so the wait is normally nothing.
+		const uint64_t ring = RSG::rasterizer->split_frame_ring();
+		submit_slot = int(draw_seq & (SUBMIT_SLOTS - 1));
+		_join_submit_slot(int((draw_seq - ring) & (SUBMIT_SLOTS - 1)));
+		_join_submit_slot(submit_slot); // The handle this frame is about to overwrite.
 		draw_seq++;
 	}
 	command_queue.launch_pipelined([this, p_present, frame_step, submit_slot](RenderGrantToken &) {

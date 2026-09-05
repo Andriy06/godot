@@ -145,6 +145,7 @@ public:
 #ifdef MACRAME_ENABLED
 	virtual bool supports_split_submit() const override;
 	virtual uint64_t stage_submit() override;
+	virtual uint32_t split_frame_ring() const override;
 	virtual void submit_staged(uint64_t p_staged, bool p_present) override;
 #endif
 

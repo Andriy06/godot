@@ -1966,6 +1966,7 @@ public:
 	// semaphore would have to be waited on by a submit that does not list the swap chain, so the
 	// split is refused and the draw stays one task.
 	bool macrame_split_supported() const { return split_draw_frames && main_queue == present_queue; }
+	uint32_t macrame_frame_ring() const { return frames.size(); }
 	uint64_t macrame_stage_submit();
 	void macrame_submit_staged(uint64_t p_staged, bool p_present);
 #endif
