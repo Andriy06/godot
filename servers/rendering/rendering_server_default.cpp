@@ -565,12 +565,27 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 		// device task it launched exists; then join that device task, because the frame slot it
 		// owns is the one the body launched below will record into.
 		command_queue.wait_oldest();
-		// The frame slot the body below records into was last used by the device task `ring` frames
-		// back, where `ring` is the device's frame ring; that one has to be joined. It was launched
-		// a whole frame earlier than the newest joinable one, so the wait is normally nothing.
+		// The body launched below touches two frame slots, not one. It records into the slot the
+		// device task `ring` renders back owned - and then `macrame_stage_submit` hands that slot
+		// over and immediately *opens the next one*, which is the slot the device task `ring - 1`
+		// renders back owned. The later of the two is the one that has to have finished: reopening
+		// a graph while its device task is still replaying it clears `command_data` under the
+		// replay, and `RenderingDeviceGraph::_check_reopen` catches it as
+		//
+		//   FATAL: access violation: class RenderingDeviceSubmit accessed for read_write without
+		//   declared access
+		//
+		// Joining only `ring` back left exactly that race: the device task one render newer was
+		// never joined, so a frame whose replay ran long (a GPU stall, a scheduling hiccup) was
+		// still holding the graph the render task went on to reopen. It fired about once in six
+		// benchmark runs; a temporary 4 ms delay at the head of the device task made it fire
+		// within a second of the benchmark starting, on every run, and none with this join.
+		//
+		// Device tasks are FIFO on the object, so joining `ring - 1` back settles `ring` back too;
+		// the second join below is only for the handle this frame is about to overwrite.
 		const uint64_t ring = RSG::rasterizer->split_frame_ring();
 		submit_slot = int(draw_seq & (SUBMIT_SLOTS - 1));
-		_join_submit_slot(int((draw_seq - ring) & (SUBMIT_SLOTS - 1)));
+		_join_submit_slot(int((draw_seq - (ring - 1)) & (SUBMIT_SLOTS - 1)));
 		_join_submit_slot(submit_slot); // The handle this frame is about to overwrite.
 		draw_seq++;
 	}
