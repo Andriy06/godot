@@ -7414,12 +7414,17 @@ void RenderingDevice::_end_transfer_worker(TransferWorker *p_transfer_worker) {
 	p_transfer_worker->recording = false;
 }
 
-void RenderingDevice::_submit_transfer_worker(TransferWorker *p_transfer_worker, VectorView<RDD::SemaphoreID> p_signal_semaphores) {
+void RenderingDevice::_submit_transfer_worker(TransferWorker *p_transfer_worker, VectorView<RDD::SemaphoreID> p_signal_semaphores, LocalVector<RDD::SemaphoreID> *r_wait_semaphores) {
 	driver->command_queue_execute_and_present(transfer_queue, {}, p_transfer_worker->command_buffer, p_signal_semaphores, p_transfer_worker->command_fence, {});
 
 	for (uint32_t i = 0; i < p_signal_semaphores.size(); i++) {
-		// Indicate the frame should wait on these semaphores before executing the main command buffer.
-		frames[frame].semaphores_to_wait_on.push_back(p_signal_semaphores[i]);
+		// Indicate the frame being closed should wait on these semaphores before executing the
+		// main command buffer. That is the submitting side's list, handed in by the caller: with
+		// two frames live, `frames[frame]` is the frame being *recorded*, which would be the wrong
+		// one (upstream could not tell them apart because there was only ever one).
+		if (r_wait_semaphores != nullptr) {
+			r_wait_semaphores->push_back(p_signal_semaphores[i]);
+		}
 	}
 
 	p_transfer_worker->submitted = true;
@@ -7495,7 +7500,7 @@ void RenderingDevice::_check_transfer_worker_index_array(IndexArray *p_index_arr
 	}
 }
 
-void RenderingDevice::_submit_transfer_workers(uint32_t p_frame, RDD::CommandBufferID p_draw_command_buffer) {
+void RenderingDevice::_submit_transfer_workers(const TightLocalVector<RDD::SemaphoreID> *p_frame_semaphores, RDD::CommandBufferID p_draw_command_buffer, LocalVector<RDD::SemaphoreID> *r_wait_semaphores) {
 	MutexLock transfer_worker_lock(transfer_worker_pool_mutex);
 	for (uint32_t i = 0; i < transfer_worker_pool_size; i++) {
 		TransferWorker *worker = transfer_worker_pool[i];
@@ -7510,9 +7515,9 @@ void RenderingDevice::_submit_transfer_workers(uint32_t p_frame, RDD::CommandBuf
 		{
 			MutexLock lock(worker->thread_mutex);
 			if (worker->recording) {
-				VectorView<RDD::SemaphoreID> semaphores = p_draw_command_buffer ? frames[p_frame].transfer_worker_semaphores[i] : VectorView<RDD::SemaphoreID>();
+				VectorView<RDD::SemaphoreID> semaphores = (p_draw_command_buffer && p_frame_semaphores != nullptr) ? (*p_frame_semaphores)[i] : VectorView<RDD::SemaphoreID>();
 				_end_transfer_worker(worker);
-				_submit_transfer_worker(worker, semaphores);
+				_submit_transfer_worker(worker, semaphores, r_wait_semaphores);
 			}
 
 			if (p_draw_command_buffer) {
@@ -8129,16 +8134,46 @@ RenderingDevice::DriverWorkarounds RenderingDevice::get_driver_workarounds() con
 void RenderingDevice::swap_buffers(bool p_present) {
 	ERR_RENDER_THREAD_GUARD();
 
-	GodotProfileZoneGroupedFirst(_profile_zone, "_end_frame");
+	GodotProfileZoneGroupedFirst(_profile_zone, "stage_submit");
 	_check_no_open_lists();
-	_end_frame(frame, *draw_graph);
+	RenderingDeviceSubmit::Staged &staged = _stage_frame(p_present);
 
-	GodotProfileZoneGrouped(_profile_zone, "_execute_frame");
-	_execute_frame(frame, p_present);
+	// Unsplit: the same hand-off value, submitted right here. The device grant is acquired for
+	// the call, so the submit object's own checks pass and the graph's owner check sees the
+	// submitting side, exactly as it does when a device task runs it.
+	GodotProfileZoneGrouped(_profile_zone, "submit");
+	_with_submit([&](RenderingDeviceSubmit &p_submit) { p_submit.submit(staged); });
 
 	// Advance to the next frame and begin recording again.
 	GodotProfileZoneGrouped(_profile_zone, "_begin_frame");
 	_advance_record_frame();
+}
+
+// Close the frame being recorded into one value. Everything the submitting side needs travels in
+// it; nothing it needs is read out of `frames[]` or out of `frame` afterwards, which is what makes
+// "the device task indexed the recording slot" unrepresentable rather than a review item.
+RenderingDeviceSubmit::Staged &RenderingDevice::_stage_frame(bool p_present) {
+	RenderingDeviceSubmit::Staged &staged = staged_frames[frame];
+	staged.slot = uint32_t(frame);
+	staged.graph = draw_graph;
+	staged.command_buffer = frames[frame].command_buffer;
+	staged.fence = frames[frame].fence;
+	staged.fence_signaled = &frame_fence_signaled[frame];
+	staged.swap_chains_to_present = frames[frame].swap_chains_to_present;
+	frames[frame].swap_chains_to_present.clear();
+	staged.present = p_present;
+#ifdef DEBUG_ENABLED
+	staged.reorder_commands = draw_graph_reorder_commands;
+	staged.full_barriers = draw_graph_full_barriers;
+#else
+	staged.reorder_commands = (RENDER_GRAPH_REORDER == 1);
+	staged.full_barriers = (RENDER_GRAPH_FULL_BARRIERS == 1);
+#endif
+	// From here the graph belongs to the submitting side, and once the submit is done to nobody:
+	// recording into it, or reopening it while the device task still holds it, faults until the
+	// recording side legitimately reopens it in `_begin_frame`.
+	draw_graph->macrame_hand_to_submit();
+	return staged;
 }
 
 // Move to the next frame slot and the other graph, and open both for recording.
@@ -8151,35 +8186,34 @@ void RenderingDevice::_advance_record_frame() {
 
 #ifdef MACRAME_ENABLED
 // --- The split draw ---------------------------------------------------------------------
-// The render task records a frame and then stages it: the frame slot and the graph it recorded
-// into are handed to the device task as one value, and this device stops being "open for
-// recording" until the next render task opens the next slot. Nothing that the device task
-// touches from here on (frames[slot], that graph, the queue) is touched by the render task,
-// which is on the other slot and the other graph.
+// The render task records a frame and then stages it: everything the device task needs travels in
+// one `RenderingDeviceSubmit::Staged` value and the graph changes owner, so the harness refuses
+// the render task any touch of the handed-over graph and refuses the device task any touch of the
+// recording state. `macrame_stage_submit` returns the slot the value is filed under; the device
+// task passes it back to `macrame_submit_staged`, which runs the submit under the device grant it
+// already holds.
 
 uint64_t RenderingDevice::macrame_stage_submit() {
 	ERR_RENDER_THREAD_GUARD_V(0);
 	_check_no_open_lists();
-	const uint64_t staged = uint64_t(uint32_t(frame)) | (uint64_t(draw_graph_index) << 32);
-	// Open the next slot and the other graph immediately, exactly where swap_buffers used to do
-	// it: everything recorded from here on (the main thread's next batch of renderer commands,
+	const uint64_t staged = uint64_t(_stage_frame(true).slot);
+	// Open the next slot and the next graph immediately, exactly where swap_buffers used to do it:
+	// everything recorded from here on (the main thread's next batch of renderer commands,
 	// resources queued for release, the next frame's draw) must land in the next frame's graph,
-	// not in the one that has just been handed over. This is also why the frame ring needs three
-	// slots with the split draw: the slot opened here must not be the one the device task owns.
+	// not in the one that has just been handed over. Moving this to the head of the next draw is
+	// the first of the two bugs the per-object guards exist to catch, and it now faults on the
+	// first frame instead of corrupting a vertex buffer. This is also why the frame ring needs
+	// three slots with the split draw: the slot opened here must not be the one the device task
+	// owns - the second bug, which faults here too.
 	GodotProfileZone("_begin_frame");
 	_advance_record_frame();
 	return staged;
 }
 
 void RenderingDevice::macrame_submit_staged(uint64_t p_staged, bool p_present) {
-	const uint32_t staged_frame = uint32_t(p_staged & 0xffffffffu);
-	const uint32_t staged_graph = uint32_t(p_staged >> 32);
-	{
-		GodotProfileZone("_end_frame");
-		_end_frame(staged_frame, draw_graphs[staged_graph]);
-	}
-	GodotProfileZone("_execute_frame");
-	_execute_frame(staged_frame, p_present);
+	RenderingDeviceSubmit::Staged &staged = staged_frames[p_staged];
+	staged.present = p_present;
+	_with_submit([&](RenderingDeviceSubmit &p_submit) { p_submit.submit(staged); });
 }
 
 #endif // MACRAME_ENABLED
@@ -8190,8 +8224,8 @@ void RenderingDevice::submit() {
 	ERR_FAIL_COND_MSG(local_device_processing, "device already submitted, call sync to wait until done.");
 
 	_check_no_open_lists();
-	_end_frame(frame, *draw_graph);
-	_execute_frame(frame, false);
+	RenderingDeviceSubmit::Staged &staged = _stage_frame(false);
+	_with_submit([&](RenderingDeviceSubmit &p_submit) { p_submit.submit(staged); });
 	local_device_processing = true;
 }
 
@@ -8411,121 +8445,13 @@ void RenderingDevice::_check_no_open_lists() {
 	}
 }
 
-void RenderingDevice::_end_frame(uint32_t p_frame, RenderingDeviceGraph &p_graph) {
-	// The command buffer must be copied into a stack variable as the driver workarounds can change the command buffer in use.
-	RDD::CommandBufferID command_buffer = frames[p_frame].command_buffer;
-	GodotProfileZoneGroupedFirst(_profile_zone, "_submit_transfer_workers");
-	_submit_transfer_workers(p_frame, command_buffer);
-	GodotProfileZoneGrouped(_profile_zone, "_submit_transfer_barriers");
-	_submit_transfer_barriers(command_buffer);
-
-#ifdef DEBUG_ENABLED
-	bool reorder_commands = draw_graph_reorder_commands;
-	bool full_barriers = draw_graph_full_barriers;
-#else
-	constexpr bool reorder_commands = (RENDER_GRAPH_REORDER == 1);
-	constexpr bool full_barriers = (RENDER_GRAPH_FULL_BARRIERS == 1);
-#endif
-
-	GodotProfileZoneGrouped(_profile_zone, "draw_graph->end");
-	p_graph.end(reorder_commands, full_barriers, command_buffer, frames[p_frame].command_buffer_pool);
-	GodotProfileZoneGrouped(_profile_zone, "driver->command_buffer_end");
-	driver->command_buffer_end(command_buffer);
-	GodotProfileZoneGrouped(_profile_zone, "driver->end_segment");
-	driver->end_segment();
-}
-
-void RenderingDevice::execute_chained_cmds(uint32_t p_frame, bool p_present_swap_chain, RenderingDeviceDriver::FenceID p_draw_fence,
-		RenderingDeviceDriver::SemaphoreID p_dst_draw_semaphore_to_signal) {
-	// Execute command buffers and use semaphores to wait on the execution of the previous one.
-	// Normally there's only one command buffer, but driver workarounds can force situations where
-	// there'll be more.
-	uint32_t command_buffer_count = 1;
-	RDG::CommandBufferPool &buffer_pool = frames[p_frame].command_buffer_pool;
-	if (buffer_pool.buffers_used > 0) {
-		command_buffer_count += buffer_pool.buffers_used;
-		buffer_pool.buffers_used = 0;
-	}
-
-	thread_local LocalVector<RDD::SwapChainID> swap_chains;
-	swap_chains.clear();
-
-	// Instead of having just one command; we have potentially many (which had to be split due to an
-	// Adreno workaround on mobile, only if the workaround is active). Thus we must execute all of them
-	// and chain them together via semaphores as dependent executions.
-	thread_local LocalVector<RDD::SemaphoreID> wait_semaphores;
-	wait_semaphores = frames[p_frame].semaphores_to_wait_on;
-
-	for (uint32_t i = 0; i < command_buffer_count; i++) {
-		RDD::CommandBufferID command_buffer;
-		RDD::SemaphoreID signal_semaphore;
-		RDD::FenceID signal_fence;
-		if (i > 0) {
-			command_buffer = buffer_pool.buffers[i - 1];
-		} else {
-			command_buffer = frames[p_frame].command_buffer;
-		}
-
-		if (i == (command_buffer_count - 1)) {
-			// This is the last command buffer, it should signal the semaphore & fence.
-			signal_semaphore = p_dst_draw_semaphore_to_signal;
-			signal_fence = p_draw_fence;
-
-			if (p_present_swap_chain) {
-				// Just present the swap chains as part of the last command execution.
-				swap_chains = frames[p_frame].swap_chains_to_present;
-			}
-		} else {
-			signal_semaphore = buffer_pool.semaphores[i];
-			// Semaphores always need to be signaled if it's not the last command buffer.
-		}
-
-		driver->command_queue_execute_and_present(main_queue, wait_semaphores, command_buffer,
-				signal_semaphore ? signal_semaphore : VectorView<RDD::SemaphoreID>(), signal_fence,
-				swap_chains);
-
-		// Make the next command buffer wait on the semaphore signaled by this one.
-		wait_semaphores.resize(1);
-		wait_semaphores[0] = signal_semaphore;
-	}
-
-	frames[p_frame].semaphores_to_wait_on.clear();
-}
-
-void RenderingDevice::_execute_frame(uint32_t p_frame, bool p_present) {
-	// Check whether this frame should present the swap chains and in which queue.
-	const bool frame_can_present = p_present && !frames[p_frame].swap_chains_to_present.is_empty();
-	const bool separate_present_queue = main_queue != present_queue;
-
-	// The semaphore is required if the frame can be presented and a separate present queue is used;
-	// since the separate queue will wait for that semaphore before presenting.
-	const RDD::SemaphoreID semaphore = (frame_can_present && separate_present_queue)
-			? frames[p_frame].semaphore
-			: RDD::SemaphoreID(nullptr);
-	const bool present_swap_chain = frame_can_present && !separate_present_queue;
-
-	execute_chained_cmds(p_frame, present_swap_chain, frames[p_frame].fence, semaphore);
-	// Indicate the fence has been signaled so the next time the frame's contents need to be
-	// used, the CPU needs to wait on the work to be completed.
-	frames[p_frame].fence_signaled = true;
-
-	if (frame_can_present) {
-		if (separate_present_queue) {
-			// Issue the presentation separately if the presentation queue is different from the main queue.
-			driver->command_queue_execute_and_present(present_queue, frames[p_frame].semaphore, {}, {}, {}, frames[p_frame].swap_chains_to_present);
-		}
-
-		frames[p_frame].swap_chains_to_present.clear();
-	}
-}
-
 void RenderingDevice::_stall_for_frame(uint32_t p_frame) {
 	thread_local PackedByteArray packed_byte_array;
 
-	if (frames[p_frame].fence_signaled) {
+	if (frame_fence_signaled[p_frame].load(std::memory_order_acquire)) {
 		GodotProfileZoneGroupedFirst(_profile_zone, "driver->fence_wait");
 		driver->fence_wait(frames[p_frame].fence);
-		frames[p_frame].fence_signaled = false;
+		frame_fence_signaled[p_frame].store(false, std::memory_order_relaxed);
 
 		// Flush any pending requests for asynchronous buffer downloads.
 		if (!frames[p_frame].download_buffer_get_data_requests.is_empty()) {
@@ -8614,10 +8540,18 @@ void RenderingDevice::_stall_for_previous_frames() {
 }
 
 void RenderingDevice::_flush_and_stall_for_all_frames(bool p_begin_frame) {
+	// Take the device grant once with an empty body first. That drains every submit queued on the
+	// object, which is what the fence stalls below need: a frame's fence is marked signaled at the
+	// hand-off, so stalling before its device task has actually submitted would wait forever.
+	// (This is also the point at which the soft spot from the previous iteration is closed: this
+	// path used to submit on the queue from the render task while a device task might be
+	// submitting, with no grant covering it at all.)
+	_with_submit([](RenderingDeviceSubmit &) {});
+
 	_stall_for_previous_frames();
 	_check_no_open_lists();
-	_end_frame(frame, *draw_graph);
-	_execute_frame(frame, false);
+	RenderingDeviceSubmit::Staged &staged = _stage_frame(false);
+	_with_submit([&](RenderingDeviceSubmit &p_submit) { p_submit.submit(staged); });
 
 	if (p_begin_frame) {
 		_begin_frame();
@@ -8674,7 +8608,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 
 	uint32_t frame_count = 1;
 	if (main_surface != 0) {
-		frame_count = MAX(2U, uint32_t(GLOBAL_GET("rendering/rendering_device/vsync/frame_queue_size")));
+		frame_count = CLAMP(uint32_t(GLOBAL_GET("rendering/rendering_device/vsync/frame_queue_size")), 2U, MAX_FRAME_GRAPHS);
 #ifdef MACRAME_ENABLED
 		if (OS::get_singleton()->get_environment("MACRAME_SPLIT_DRAW") != "0") {
 			// The split draw needs one slot for the frame being recorded, one for the frame the
@@ -8775,17 +8709,12 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 			frame_failed = true;
 			break;
 		}
-		frames[i].semaphore = driver->semaphore_create();
-		if (!frames[i].semaphore) {
-			frame_failed = true;
-			break;
-		}
 		frames[i].fence = driver->fence_create();
 		if (!frames[i].fence) {
 			frame_failed = true;
 			break;
 		}
-		frames[i].fence_signaled = false;
+		frame_fence_signaled[i].store(false, std::memory_order_relaxed);
 
 		// Create query pool.
 		frames[i].timestamp_pool = driver->timestamp_query_pool_create(max_timestamp_query_elements);
@@ -8797,18 +8726,30 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		frames[i].timestamp_result_values.resize(max_timestamp_query_elements);
 		frames[i].timestamp_result_count = 0;
 
-		// Assign the main queue family and command pool to the command buffer pool.
-		frames[i].command_buffer_pool.pool = frames[i].command_pool;
+	}
 
-		// Create the semaphores for the transfer workers.
-		frames[i].transfer_worker_semaphores.resize(transfer_worker_pool_max_size);
-		for (uint32_t j = 0; j < transfer_worker_pool_max_size; j++) {
-			frames[i].transfer_worker_semaphores[j] = driver->semaphore_create();
-			if (!frames[i].transfer_worker_semaphores[j]) {
-				frame_failed = true;
-				break;
-			}
+	// The submission half's per-slot records (the secondary command buffer pool, the present
+	// semaphore, the transfer workers' per-frame semaphores) belong to the submit object. Its
+	// methods check the device grant, so setting it up goes through the guarded object; at this
+	// point in startup no device task exists and the access runs inline.
+	if (!frame_failed) {
+		LocalVector<RDD::CommandPoolID> command_pools;
+		command_pools.resize(frames.size());
+		for (uint32_t i = 0; i < frames.size(); i++) {
+			command_pools[i] = frames[i].command_pool;
 		}
+		bool slots_ok = false;
+		_with_submit([&](RenderingDeviceSubmit &p_submit) {
+			p_submit.configure(this, driver, main_queue, present_queue);
+			slots_ok = p_submit.create_slots(frames.size(), command_pools, transfer_worker_pool_max_size);
+			submit_state = &p_submit;
+		});
+#ifdef MACRAME_ENABLED
+		// From here `MacrameRenderDevice::check_access()` (the command graph's owner check, and
+		// anything else that asks) faults unless the caller declared the device grant.
+		macrame_register_device_submit_checker();
+#endif
+		frame_failed = !slots_ok;
 	}
 	if (frame_failed) {
 		// Clean up created data.
@@ -8816,21 +8757,14 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 			if (frames[i].command_pool) {
 				driver->command_pool_free(frames[i].command_pool);
 			}
-			if (frames[i].semaphore) {
-				driver->semaphore_free(frames[i].semaphore);
-			}
 			if (frames[i].fence) {
 				driver->fence_free(frames[i].fence);
 			}
 			if (frames[i].timestamp_pool) {
 				driver->timestamp_query_pool_free(frames[i].timestamp_pool);
 			}
-			for (uint32_t j = 0; j < frames[i].transfer_worker_semaphores.size(); j++) {
-				if (frames[i].transfer_worker_semaphores[j]) {
-					driver->semaphore_free(frames[i].transfer_worker_semaphores[j]);
-				}
-			}
 		}
+		_with_submit([](RenderingDeviceSubmit &p_submit) { p_submit.destroy_slots(); });
 		frames.clear();
 		ERR_FAIL_V_MSG(FAILED, "Failed to create frame data.");
 	}
@@ -8853,6 +8787,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 	draw_graph_count = split_draw_frames ? frames.size() : 1u;
 	for (uint32_t i = 0; i < draw_graph_count; i++) {
 		draw_graphs[i].initialize(driver, &_render_pass_create_from_graph, frames.size(), main_queue_family, SECONDARY_COMMAND_BUFFERS_PER_FRAME);
+		draw_graphs[i].macrame_set_submit_owner(submit_state);
 	}
 	draw_graph_index = (draw_graph_count > 1) ? uint32_t(frame) : 0u;
 	draw_graph = &draw_graphs[draw_graph_index];
@@ -9196,7 +9131,7 @@ void RenderingDevice::finalize() {
 	}
 
 	// Wait for transfer workers to finish.
-	_submit_transfer_workers(frame);
+	_submit_transfer_workers();
 	_wait_for_transfer_workers();
 
 	// Delete everything the graphs have created.
@@ -9265,18 +9200,14 @@ void RenderingDevice::finalize() {
 		_free_pending_resources(f);
 		driver->command_pool_free(frames[i].command_pool);
 		driver->timestamp_query_pool_free(frames[i].timestamp_pool);
-		driver->semaphore_free(frames[i].semaphore);
 		driver->fence_free(frames[i].fence);
-
-		RDG::CommandBufferPool &buffer_pool = frames[i].command_buffer_pool;
-		for (uint32_t j = 0; j < buffer_pool.buffers.size(); j++) {
-			driver->semaphore_free(buffer_pool.semaphores[j]);
-		}
-
-		for (uint32_t j = 0; j < frames[i].transfer_worker_semaphores.size(); j++) {
-			driver->semaphore_free(frames[i].transfer_worker_semaphores[j]);
-		}
 	}
+
+	// The submission half's per-slot records go with them.
+	if (submit_state != nullptr) {
+		_with_submit([](RenderingDeviceSubmit &p_submit) { p_submit.destroy_slots(); });
+	}
+	submit_state = nullptr;
 
 	if (pipeline_cache_enabled) {
 		update_pipeline_cache(true);

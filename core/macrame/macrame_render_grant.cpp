@@ -71,7 +71,18 @@ MACRAME_NO_INLINE void MacrameRenderDevice::set_holds_grant(bool p_holds) {
 namespace {
 bool (*render_access_query)() = nullptr;
 RenderGrantToken *render_token = nullptr;
+void (*device_access_check)(const void *) = nullptr;
 } // namespace
+
+void MacrameRenderDevice::set_access_checker(void (*p_check)(const void *)) {
+	device_access_check = p_check;
+}
+
+void MacrameRenderDevice::check_access(const void *p_object) {
+	if (device_access_check && p_object) {
+		device_access_check(p_object);
+	}
+}
 
 void MacrameRender::set_access_query(bool (*p_query)()) {
 	render_access_query = p_query;
@@ -82,7 +93,10 @@ void MacrameRender::set_token(RenderGrantToken *p_token) {
 }
 
 bool MacrameRender::check_access() {
-	if (macrame_tls_holds_render_grant || macrame_tls_holds_render_device_grant) {
+	// The render grant only. The device task holds a grant on `RenderingDeviceSubmit` instead and
+	// is refused here, which is what makes the split visible to the harness rather than a matter
+	// of review.
+	if (macrame_tls_holds_render_grant) {
 		return true;
 	}
 	if (!render_access_query) {

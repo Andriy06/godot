@@ -63,25 +63,32 @@ void set_holds_grant(bool p_holds);
 // grant (the draw body) or may touch the renderer directly (a blue thread with no draw in
 // flight, as the server's query reports); otherwise Macrame checks the running task's grants
 // against the renderer's token and faults with its own diagnostics.
+//
+// This is the *recording* side only. The device task holds a different grant on a different
+// object (`RenderingDeviceSubmit`) and must not pass these guards: the whole point of the split
+// is that the harness can tell a recording task touching submission state from a submitting task
+// touching recording state. See `MacrameRenderDevice::check_access`.
 void set_access_query(bool (*p_query)());
 void set_token(RenderGrantToken *p_token);
 bool check_access();
 } // namespace MacrameRender
 
-// The split draw's second guarded object: the device side of the renderer (the frame slot being
-// submitted, the graph being replayed, the queue). The render task records frame N+1 while the
-// device task submits frame N, so the two hold different grants and the harness keeps everyone
-// else out of both. RenderingDevice's thread guards accept either, because the split is by
-// construction (the device task only calls the submit path) rather than by guard placement.
-struct RenderDeviceGrantToken {
-	int unused = 0;
-};
-
+// The split draw's second guarded object is `RenderingDeviceSubmit` itself: the frame slot being
+// submitted, the graph being replayed, the queue and the fence bookkeeping. It is the payload of
+// the device `Guarded`, not a token, so its own methods carry `TS_CHECK_ACCESS()`. This namespace
+// is the hook the parts that cannot include it (the command graph's owner check) call instead.
 namespace MacrameRenderDevice {
 inline bool holds_grant() {
 	return macrame_tls_holds_render_device_grant;
 }
 void set_holds_grant(bool p_holds);
+
+// Registered by `RenderingDevice::initialize` once a submit object exists; the checker faults
+// (naming `RenderingDeviceSubmit` and the mode) unless the running task declared the device grant
+// on *that* object. The instance is a parameter because a local device has its own submit object
+// and its own guarded queue. Before registration, and in builds without a device, this is a no-op.
+void set_access_checker(void (*p_check)(const void *));
+void check_access(const void *p_object);
 } // namespace MacrameRenderDevice
 
 struct PhysicsGrantToken {

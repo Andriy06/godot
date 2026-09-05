@@ -37,6 +37,7 @@
 #include "core/macrame/macrame_command_queue.h"
 #include "core/macrame/macrame_render_grant.h"
 #include "core/macrame/macrame_render_outputs.h"
+#include "servers/rendering/rendering_device_submit.h"
 #endif
 #include "core/templates/hash_map.h"
 #include "servers/rendering/renderer_canvas_cull.h"
@@ -87,14 +88,15 @@ class RenderingServerDefault : public RenderingServer {
 	mutable MacrameCommandQueue<RenderGrantToken> command_queue{ "renderer", &MacrameRender::holds_grant };
 
 	// The split draw. The renderer's guarded object covers the recording side (scene update,
-	// culling, render lists, the commands recorded into one of the device's two graphs); this
-	// second guarded object covers the device side (the frame slot being replayed into a command
-	// buffer, submitted and presented). The render task hands the recorded frame over as one
-	// opaque value and launches the device task on this object, so frame N's submit overlaps
-	// frame N+1's recording. Ordering: the device tasks are FIFO on this object, each is launched
-	// by the render task that recorded its frame, and the main thread joins the device task whose
-	// frame slot the next render task is about to reuse.
-	mutable ts::Guarded<RenderDeviceGrantToken> device_guarded{ ts::Named{ "render-device" } };
+	// culling, render lists, the commands recorded into one of the device's graphs); the device
+	// side is a second guarded object whose payload is `RenderingDeviceSubmit` - the submission
+	// state itself, not a token - and which the device owns, so its methods can check the grant
+	// for themselves. The render task hands the recorded frame over as one value and launches the
+	// device task on that object, so frame N's submit overlaps frame N+1's recording. Ordering:
+	// the device tasks are FIFO on the object, each is launched by the render task that recorded
+	// its frame, and the main thread joins the device task whose frame slot the next render task
+	// is about to reuse.
+	ts::Guarded<RenderingDeviceSubmit> *device_guarded = nullptr;
 	static constexpr int SUBMIT_SLOTS = 4;
 	ts::Task<void> submit_tasks[SUBMIT_SLOTS];
 	bool submit_valid[SUBMIT_SLOTS] = {};

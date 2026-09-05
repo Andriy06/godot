@@ -34,6 +34,8 @@
 #include "servers/rendering/rendering_device_commons.h"
 #include "servers/rendering/rendering_device_driver.h"
 
+#include <atomic>
+
 #ifdef DEV_ENABLED
 #include "core/templates/rb_map.h"
 #endif
@@ -855,6 +857,11 @@ private:
 	RBMap<ResourceTracker *, uint32_t> write_dependency_counters;
 #endif
 
+	std::atomic<uint32_t> graph_owner{ GRAPH_OWNER_RECORD };
+	const void *graph_submit_owner = nullptr;
+	void _check_owner();
+	void _check_reopen();
+
 	static String _usage_to_string(ResourceUsage p_usage);
 	static bool _is_write_usage(ResourceUsage p_usage);
 	static RDD::TextureLayout _usage_to_image_layout(ResourceUsage p_usage);
@@ -895,6 +902,31 @@ private:
 public:
 	RenderingDeviceGraph();
 	~RenderingDeviceGraph();
+
+	// Per-object ownership of a graph, for the split draw's harness.
+	//
+	// A graph is recorded into by the render task and replayed by the device task, and the two run
+	// at the same time on different graphs. Which task may touch a given graph is not static, so
+	// the graph carries its own owner and every structural entry point (`begin`, `end`, and the
+	// command allocation that every `add_*` funnels through) asks the *current* owner's harness
+	// for a grant. The cycle is: the render task hands its graph over at `macrame_stage_submit`
+	// (RECORD -> SUBMIT), the device task closes it when the submit is done (SUBMIT -> CLOSED),
+	// and the recording side takes it back when it reopens the slot (CLOSED -> RECORD, in
+	// `begin`). CLOSED is the state that matters: the frame has been submitted and nobody owns
+	// the graph, so any touch faults - which is exactly "the staged commands landed in the frame
+	// that was already submitted". Reopening a graph in SUBMIT is "two graphs are not enough",
+	// and faults naming the submit object and the grant the caller does not hold.
+	enum GraphOwner {
+		GRAPH_OWNER_RECORD, // Open for recording; the render grant is what may touch it.
+		GRAPH_OWNER_SUBMIT, // Handed over; the device grant is what may touch it.
+		GRAPH_OWNER_CLOSED, // Submitted and finished with: nobody owns it until `begin` reopens it.
+	};
+	void macrame_hand_to_submit();
+	void macrame_close_after_submit();
+	// The submit object of the device this graph belongs to (a local device has its own). The
+	// owner check asks for a grant on that instance, not on "the renderer".
+	void macrame_set_submit_owner(const void *p_submit) { graph_submit_owner = p_submit; }
+
 	void initialize(RDD *p_driver, RenderPassCreationFunction p_render_pass_creation_function, uint32_t p_frame_count, RDD::CommandQueueFamilyID p_secondary_command_queue_family, uint32_t p_secondary_command_buffers_per_frame);
 	void finalize();
 	// `p_tracking_frame` must be a value never used before by any graph that shares these

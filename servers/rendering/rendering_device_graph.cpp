@@ -30,6 +30,11 @@
 
 #include "rendering_device_graph.h"
 
+#ifdef MACRAME_ENABLED
+#include "core/macrame/macrame_render_grant.h"
+#include "ts/access.h"
+#endif
+
 #define PRINT_RENDER_GRAPH 0
 #define FORCE_FULL_ACCESS_BITS 0
 #define PRINT_RESOURCE_TRACKER_TOTAL 0
@@ -318,7 +323,63 @@ int32_t RenderingDeviceGraph::_add_to_write_list(int32_t p_command_index, Rect2i
 // Ensures all commands are 8-byte aligned.
 #define GRAPH_ALIGN(x) (((x) + 7u) & 0xFFFFFFF8u)
 
+// The graph's harness hook. Whoever owns the graph right now must hold that side's grant:
+// the recording side the render grant, the submitting side the device grant. Both calls are
+// fatal (naming the object and the mode) when the grant is missing, and both fall through
+// silently before the guarded objects are registered, which is where the device is initialized.
+void RenderingDeviceGraph::_check_owner() {
+#ifdef MACRAME_ENABLED
+	switch (graph_owner.load(std::memory_order_relaxed)) {
+		case GRAPH_OWNER_SUBMIT:
+			MacrameRenderDevice::check_access(graph_submit_owner);
+			break;
+		case GRAPH_OWNER_CLOSED:
+			// Between owners: the frame it holds has been submitted and the recording side has not
+			// reopened it. Nobody has a grant on it, and nothing may touch it - which is what
+			// "the staged commands landed in the frame that was already submitted" is. The graph
+			// is not a guarded payload, so this is always fatal, naming the graph itself.
+			ts::access_check(this);
+			break;
+		default:
+			MacrameRender::check_access();
+			break;
+	}
+#endif
+}
+
+// `begin` is the one transition that takes a graph back from the submitting side. It is legal
+// from CLOSED (the normal reopen) and from RECORD (the very first frame, and a local device's
+// begin after sync); from SUBMIT it means the recording side is about to clear a graph the device
+// task is still replaying, which is the "two graphs are not enough" mistake, and it faults naming
+// the submit object and the grant the caller does not hold.
+void RenderingDeviceGraph::_check_reopen() {
+#ifdef MACRAME_ENABLED
+	if (graph_owner.load(std::memory_order_relaxed) == GRAPH_OWNER_SUBMIT) {
+		MacrameRenderDevice::check_access(graph_submit_owner);
+	} else {
+		MacrameRender::check_access();
+	}
+	graph_owner.store(GRAPH_OWNER_RECORD, std::memory_order_relaxed);
+#endif
+}
+
+void RenderingDeviceGraph::macrame_hand_to_submit() {
+	// Only the side that currently owns the graph may hand it over.
+	_check_owner();
+#ifdef MACRAME_ENABLED
+	graph_owner.store(GRAPH_OWNER_SUBMIT, std::memory_order_relaxed);
+#endif
+}
+
+void RenderingDeviceGraph::macrame_close_after_submit() {
+	_check_owner();
+#ifdef MACRAME_ENABLED
+	graph_owner.store(GRAPH_OWNER_CLOSED, std::memory_order_release);
+#endif
+}
+
 RenderingDeviceGraph::RecordedCommand *RenderingDeviceGraph::_allocate_command(uint32_t p_command_size, int32_t &r_command_index) {
+	_check_owner();
 	uint32_t command_data_offset = command_data.size();
 	command_data_offset = GRAPH_ALIGN(command_data_offset);
 	command_data_offsets.push_back(command_data_offset);
@@ -1799,6 +1860,7 @@ void RenderingDeviceGraph::finalize() {
 }
 
 void RenderingDeviceGraph::begin(int64_t p_tracking_frame) {
+	_check_reopen();
 	command_data.clear();
 	command_data_offsets.clear();
 	command_normalization_barriers.clear();
@@ -2633,6 +2695,7 @@ void RenderingDeviceGraph::end_label() {
 }
 
 void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool) {
+	_check_owner();
 	if (command_count == 0) {
 		// No commands have been logged, do nothing.
 		return;

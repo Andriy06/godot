@@ -44,6 +44,13 @@
 #include "servers/rendering/rendering_device_driver.h"
 #include "servers/rendering/rendering_device_enums.h"
 #include "servers/rendering/rendering_device_graph.h"
+#include "servers/rendering/rendering_device_submit.h"
+
+#ifdef MACRAME_ENABLED
+#include "core/macrame/macrame_render_grant.h"
+#include "ts/guarded.h"
+#include "ts/rules.h"
+#endif
 
 class RDTextureFormat;
 class RDTextureView;
@@ -1730,7 +1737,10 @@ private:
 	TransferWorker *_acquire_transfer_worker(uint32_t p_transfer_size, uint32_t p_required_align, uint32_t &r_staging_offset);
 	void _release_transfer_worker(TransferWorker *p_transfer_worker);
 	void _end_transfer_worker(TransferWorker *p_transfer_worker);
-	void _submit_transfer_worker(TransferWorker *p_transfer_worker, VectorView<RDD::SemaphoreID> p_signal_semaphores = VectorView<RDD::SemaphoreID>());
+	// `r_wait_semaphores` collects the semaphores the frame being closed must wait on. It belongs
+	// to the submitting side (the caller passes its own list); upstream kept it in the `frames`
+	// ring indexed by the *recording* slot, which is the wrong frame once two are live.
+	void _submit_transfer_worker(TransferWorker *p_transfer_worker, VectorView<RDD::SemaphoreID> p_signal_semaphores = VectorView<RDD::SemaphoreID>(), LocalVector<RDD::SemaphoreID> *r_wait_semaphores = nullptr);
 	void _wait_for_transfer_worker(TransferWorker *p_transfer_worker);
 	void _flush_barriers_for_transfer_worker(TransferWorker *p_transfer_worker);
 	void _check_transfer_worker_operation(uint32_t p_transfer_worker_index, uint64_t p_transfer_worker_operation);
@@ -1738,7 +1748,7 @@ private:
 	void _check_transfer_worker_texture(Texture *p_texture);
 	void _check_transfer_worker_vertex_array(VertexArray *p_vertex_array);
 	void _check_transfer_worker_index_array(IndexArray *p_index_array);
-	void _submit_transfer_workers(uint32_t p_frame, RDD::CommandBufferID p_draw_command_buffer = RDD::CommandBufferID());
+	void _submit_transfer_workers(const TightLocalVector<RDD::SemaphoreID> *p_frame_semaphores = nullptr, RDD::CommandBufferID p_draw_command_buffer = RDD::CommandBufferID(), LocalVector<RDD::SemaphoreID> *r_wait_semaphores = nullptr);
 	void _submit_transfer_barriers(RDD::CommandBufferID p_draw_command_buffer);
 	void _wait_for_transfer_workers();
 	void _free_transfer_workers();
@@ -1769,6 +1779,66 @@ private:
 	uint32_t draw_graph_count = 1;
 	bool split_draw_frames = false; // Set in initialize(): one graph per frame slot, three slots.
 	int64_t graph_tracking_frame = 0;
+
+	/*******************************/
+	/**** SUBMISSION (DEVICE)   ****/
+	/*******************************/
+
+	// The submission half, as its own object (see rendering_device_submit.h). Everything below
+	// this line that the device task touches lives in there; what stays in `RenderingDevice` is
+	// the recording side, under the render grant. The two meet only through `Staged`.
+	friend class RenderingDeviceSubmit;
+#ifdef MACRAME_ENABLED
+	ts::Guarded<RenderingDeviceSubmit> submit_guarded{ ts::Named{ "render-device" } };
+#else
+	RenderingDeviceSubmit submit_object;
+#endif
+	// The payload's address, resolved once at initialize(); dereferenced only under the grant,
+	// which every method of the object checks for itself.
+	RenderingDeviceSubmit *submit_state = nullptr;
+
+	// One staged record per frame slot. The record for a slot is only rewritten when that slot is
+	// reopened for recording, which happens after its device task has been joined.
+	RenderingDeviceSubmit::Staged staged_frames[MAX_FRAME_GRAPHS];
+
+	// The only write-back from the submitting side to the recording side: "a submission is
+	// outstanding on this slot's fence". It has to be a hand-back rather than an owner, because
+	// the flag is set when the frame is submitted and consumed a few frames later when the
+	// recording side reopens the slot, and the two events are in different tasks by construction.
+	// Making the recording side set it at the hand-off instead would be wrong in the window where
+	// the device task has not run yet - the recording side would wait on a fence nobody has
+	// submitted - and closing that window by joining the device task one frame earlier costs
+	// 1.07 ms per frame (see 2.8). So it is one atomic word, carried to the submitting side by
+	// pointer inside `Staged`, and nothing else crosses.
+	std::atomic<bool> frame_fence_signaled[MAX_FRAME_GRAPHS] = {};
+
+	// Close the frame currently being recorded into a staged value: which slot, which graph, the
+	// command buffer and fence it was opened with, the swap chains it acquired. Hands the graph to
+	// the submitting side and marks the fence as one a submit will signal.
+	RenderingDeviceSubmit::Staged &_stage_frame(bool p_present);
+
+	// Run `p_fn` under the device grant. Inside the device task the grant is already held, so the
+	// call is direct; everywhere else (a blue thread's synchronous read-back, the unsplit draw,
+	// the render task's flush-and-stall) the object is acquired, which also drains every device
+	// task queued on it.
+	template <typename Fn>
+	void _with_submit(Fn &&p_fn) {
+#ifdef MACRAME_ENABLED
+		if (MacrameRenderDevice::holds_grant()) {
+			p_fn(*submit_state); // The device task: it already holds the grant its methods check for.
+			return;
+		}
+		// Acquiring the object here is also the drain that makes a following fence stall
+		// meaningful. From a blue thread the wait is ordinary. From the render task (a
+		// synchronous read-back, a swap-chain resize) it is a bounded wait the library cannot
+		// see: device tasks never touch the render object, so this serialises but cannot
+		// deadlock - which is exactly what `Relaxed_scope` is for.
+		ts::Relaxed_scope relax{ ts::Rule::in_task_sync };
+		submit_guarded.access([&](RenderingDeviceSubmit &p_submit) { p_fn(p_submit); }).sync();
+#else
+		p_fn(submit_object);
+#endif
+	}
 
 #ifdef DEBUG_ENABLED
 	bool draw_graph_reorder_commands = true;
@@ -1836,26 +1906,17 @@ private:
 		// The command buffer used by the main thread when recording the frame.
 		RDD::CommandBufferID command_buffer;
 
-		// Signaled by the command buffer submission. Present must wait on this semaphore.
-		RDD::SemaphoreID semaphore;
-
-		// Signaled by the command buffer submission. Must wait on this fence before beginning command recording for the frame.
+		// Signaled by the command buffer submission. Must wait on this fence before beginning
+		// command recording for the frame. The recording side owns it - it is this side's "is the
+		// slot safe to reopen" token - and hands its id to the submit in the staged value. Whether
+		// a submission is actually outstanding on it is `frame_fence_signaled`, the one write-back
+		// from the submitting side (see there).
 		RDD::FenceID fence;
-		bool fence_signaled = false;
 
-		// Semaphores the frame must wait on before executing the command buffer.
-		LocalVector<RDD::SemaphoreID> semaphores_to_wait_on;
-
-		// Swap chains prepared for drawing during the frame that must be presented.
+		// Swap chains prepared for drawing during the frame that must be presented. Written while
+		// the frame is recorded (`screen_prepare_for_drawing`); moved into the staged value at the
+		// hand-off, so the submitting side never reaches into this slot.
 		LocalVector<RDD::SwapChainID> swap_chains_to_present;
-
-		// Semaphores the transfer workers can use to wait before rendering the frame.
-		// This must have the same size of the transfer worker pool.
-		TightLocalVector<RDD::SemaphoreID> transfer_worker_semaphores;
-
-		// Extra command buffer pool used for driver workarounds or to reduce GPU bubbles by
-		// splitting the final render pass to the swapchain into its own cmd buffer.
-		RDG::CommandBufferPool command_buffer_pool;
 
 		struct Timestamp {
 			String description;
@@ -1896,19 +1957,10 @@ private:
 	SafeNumeric<uint64_t> texture_memory;
 	SafeNumeric<uint64_t> buffer_memory;
 
-protected:
-	void execute_chained_cmds(uint32_t p_frame, bool p_present_swap_chain,
-			RenderingDeviceDriver::FenceID p_draw_fence,
-			RenderingDeviceDriver::SemaphoreID p_dst_draw_semaphore_to_signal);
-
 public:
 	void _free_internal(RID p_id);
 	void _check_no_open_lists();
 	void _begin_frame(bool p_presented = false);
-	// The frame slot and the graph are explicit: with the split draw the frame being submitted is
-	// not the frame being recorded.
-	void _end_frame(uint32_t p_frame, RenderingDeviceGraph &p_graph);
-	void _execute_frame(uint32_t p_frame, bool p_present);
 	void _advance_record_frame();
 	void _stall_for_frame(uint32_t p_frame);
 	void _stall_for_previous_frames();
@@ -1967,6 +2019,9 @@ public:
 	// split is refused and the draw stays one task.
 	bool macrame_split_supported() const { return split_draw_frames && main_queue == present_queue; }
 	uint32_t macrame_frame_ring() const { return frames.size(); }
+	// The device task runs on this object; its payload is the submission state, so the harness
+	// checks the state itself rather than a token standing next to it.
+	ts::Guarded<RenderingDeviceSubmit> *macrame_device_guarded() { return &submit_guarded; }
 	uint64_t macrame_stage_submit();
 	void macrame_submit_staged(uint64_t p_staged, bool p_present);
 #endif

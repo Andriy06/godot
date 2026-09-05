@@ -153,6 +153,10 @@ uint64_t RendererCompositorRD::stage_submit() {
 void RendererCompositorRD::submit_staged(uint64_t p_staged, bool p_present) {
 	RD::get_singleton()->macrame_submit_staged(p_staged, p_present);
 }
+
+ts::Guarded<RenderingDeviceSubmit> *RendererCompositorRD::get_device_guarded() {
+	return RD::get_singleton()->macrame_device_guarded();
+}
 #endif
 
 void RendererCompositorRD::initialize() {

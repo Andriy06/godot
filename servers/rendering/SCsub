@@ -32,6 +32,7 @@ if env["rendering_device"]:
     env.add_source_files(env.servers_sources, "rendering_device_commons.cpp")
     env.add_source_files(env.servers_sources, "rendering_device_driver.cpp")
     env.add_source_files(env.servers_sources, "rendering_device_graph.cpp")
+    env.add_source_files(env.servers_sources, "rendering_device_submit.cpp")
     env.add_source_files(env.servers_sources, "rendering_shader_container.cpp")
 
     SConscript("renderer_rd/SCsub")

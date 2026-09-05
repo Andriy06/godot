@@ -34,6 +34,14 @@
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_types.h"
 
+#ifdef MACRAME_ENABLED
+namespace ts {
+template <typename T>
+class Guarded;
+}
+class RenderingDeviceSubmit;
+#endif
+
 class RendererCanvasRender;
 class RendererSceneRender;
 
@@ -94,6 +102,12 @@ public:
 	virtual uint64_t stage_submit() { return 0; }
 	virtual uint32_t split_frame_ring() const { return 1; }
 	virtual void submit_staged(uint64_t p_staged, bool p_present) {}
+#ifdef MACRAME_ENABLED
+	// The device side's guarded object. Its payload is the submission state itself
+	// (`RenderingDeviceSubmit`), owned by the device, so the render server launches the device
+	// task on the object whose methods enforce the grant rather than on a token beside it.
+	virtual ts::Guarded<RenderingDeviceSubmit> *get_device_guarded() { return nullptr; }
+#endif
 
 	virtual void finalize() = 0;
 	virtual uint64_t get_frame_number() const = 0;

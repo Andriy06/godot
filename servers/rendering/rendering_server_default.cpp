@@ -153,7 +153,7 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, int p
 			RSG::rasterizer->submit_staged(staged, p_swap_buffers);
 		} else {
 			submits_in_flight.fetch_add(1, std::memory_order_relaxed);
-			submit_tasks[p_submit_slot] = device_guarded.async([staged, p_swap_buffers](RenderDeviceGrantToken &) {
+			submit_tasks[p_submit_slot] = device_guarded->async([staged, p_swap_buffers](RenderingDeviceSubmit &) {
 				MacrameRenderDevice::set_holds_grant(true);
 				MacrameRuntime::long_task_begin();
 				RSG::rasterizer->submit_staged(staged, p_swap_buffers);
@@ -333,7 +333,8 @@ void RenderingServerDefault::_init() {
 	sr->set_scene_render(RSG::rasterizer->get_scene());
 #ifdef MACRAME_ENABLED
 	// MACRAME_SPLIT_DRAW=0 runs the draw as one task again (the frame's submit inline), for A/B.
-	split_draw = RSG::rasterizer->supports_split_submit() && OS::get_singleton()->get_environment("MACRAME_SPLIT_DRAW") != "0";
+	device_guarded = RSG::rasterizer->get_device_guarded();
+	split_draw = device_guarded != nullptr && RSG::rasterizer->supports_split_submit() && OS::get_singleton()->get_environment("MACRAME_SPLIT_DRAW") != "0";
 	split_inline = OS::get_singleton()->get_environment("MACRAME_SPLIT_INLINE") == "1";
 	print_verbose(split_draw ? "Macrame: split draw enabled (record task + device submit task)" : "Macrame: split draw disabled");
 #endif
