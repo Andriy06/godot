@@ -143,6 +143,20 @@ MacrameScene::FrameNodeAdder render_node_adder = nullptr;
 bool graph_running = false;
 void _write_phase_trace(PhaseGraph &pg);
 void _write_frame_trace(FrameGraph &fg);
+namespace {
+// Graph_trace freezes its utilization bucket width from the makespan mean of the first bucketed
+// run. The benchmark's first runs execute an empty scene (~0.2 ms), so the wash would cover a
+// sliver of a real 7 ms run. Reset the aggregates once the scene is populated; the SVG is
+// written 3000 runs after that. MACRAME_TRACE_WARMUP=<runs> (default 300).
+uint64_t trace_warmup_runs() {
+	static const uint64_t n = [] {
+		const String v = OS::get_singleton()->get_environment("MACRAME_TRACE_WARMUP");
+		return v.is_empty() ? uint64_t(300) : uint64_t(v.to_int());
+	}();
+	return n;
+}
+} // namespace
+
 
 } // namespace
 
@@ -344,7 +358,11 @@ void MacrameScene::run_groups(SceneTree *p_tree, void **p_groups, int p_group_co
 		pg.physics = p_physics;
 		pg.buckets.swap(buckets);
 		pg.graph.execute().sync(); // One run at a time; the phases are sequential on the main thread.
-		if (++pg.runs == 3000 && !pg.written) {
+		++pg.runs;
+		if (pg.runs == trace_warmup_runs()) {
+			pg.trace.reset(); // Bucket width re-derived from populated runs.
+		}
+		if (pg.runs == trace_warmup_runs() + 3000 && !pg.written) {
 			// The average run so far, written mid-run (the benchmark harness kills the process; the
 			// shutdown path is not reached).
 			_write_phase_trace(pg);
@@ -480,7 +498,11 @@ void _frame_run(FrameGraph &fg, SceneTree *p_tree) {
 	for (auto &b : fs.frame_buckets) {
 		b.clear();
 	}
-	if (++fg.runs == 3000 && !fg.written) {
+	++fg.runs;
+	if (fg.runs == trace_warmup_runs()) {
+		fg.trace.reset(); // Bucket width re-derived from populated runs.
+	}
+	if (fg.runs == trace_warmup_runs() + 3000 && !fg.written) {
 		// The average run so far, written mid-run (the benchmark harness kills the process; the
 		// shutdown path is not reached).
 		_write_frame_trace(fg);
