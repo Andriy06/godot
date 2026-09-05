@@ -57,7 +57,7 @@ struct SceneShardToken {
 };
 
 namespace MacrameScene {
-constexpr int SHARD_COUNT = 32; // Fixed. MACRAME_SHARDS caps how many receive groups. Measured at 500 NPCs on a 22-thread laptop: 16 and 32 within noise, 64 worse (per-call cost grows with concurrency).
+constexpr int SHARD_COUNT = 64; // Fixed. MACRAME_SHARDS caps how many receive groups. Measured at 500 NPCs on a 22-thread laptop: 16 and 32 within noise, 64 worse (per-call cost grows with concurrency).
 
 void init();
 // Destroys the compiled frame and phase graphs (writing their traces first). Must run while
