@@ -390,11 +390,14 @@ RenderingDeviceGraph::RecordedCommand *RenderingDeviceGraph::_allocate_command(u
 	return new_command;
 }
 
+thread_local uint32_t RenderingDeviceGraph::draw_recorder_index = 0;
+
 RenderingDeviceGraph::DrawListInstruction *RenderingDeviceGraph::_allocate_draw_list_instruction(uint32_t p_instruction_size) {
-	uint32_t draw_list_data_offset = draw_instruction_list.data.size();
+	LocalVector<uint8_t> &draw_list_data = _draw_recorder_data();
+	uint32_t draw_list_data_offset = draw_list_data.size();
 	draw_list_data_offset = GRAPH_ALIGN(draw_list_data_offset);
-	draw_instruction_list.data.resize(draw_list_data_offset + p_instruction_size);
-	return reinterpret_cast<DrawListInstruction *>(&draw_instruction_list.data[draw_list_data_offset]);
+	draw_list_data.resize(draw_list_data_offset + p_instruction_size);
+	return reinterpret_cast<DrawListInstruction *>(&draw_list_data[draw_list_data_offset]);
 }
 
 RenderingDeviceGraph::ComputeListInstruction *RenderingDeviceGraph::_allocate_compute_list_instruction(uint32_t p_instruction_size) {
@@ -2246,7 +2249,7 @@ void RenderingDeviceGraph::add_draw_list_bind_index_buffer(RDD::BufferID p_buffe
 	instruction->offset = p_offset;
 
 	if (instruction->buffer.id != 0) {
-		draw_instruction_list.stages.set_flag(RDD::PIPELINE_STAGE_VERTEX_INPUT_BIT);
+		_draw_recorder_stages().set_flag(RDD::PIPELINE_STAGE_VERTEX_INPUT_BIT);
 	}
 }
 
@@ -2254,7 +2257,7 @@ void RenderingDeviceGraph::add_draw_list_bind_pipeline(RDD::PipelineID p_pipelin
 	DrawListBindPipelineInstruction *instruction = reinterpret_cast<DrawListBindPipelineInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListBindPipelineInstruction)));
 	instruction->type = DrawListInstruction::TYPE_BIND_PIPELINE;
 	instruction->pipeline = p_pipeline;
-	draw_instruction_list.stages = draw_instruction_list.stages | p_pipeline_stage_bits;
+	_draw_recorder_stages() = _draw_recorder_stages() | p_pipeline_stage_bits;
 
 	workarounds_state.bound_any_draw_list_pipeline = true;
 }
@@ -2296,7 +2299,7 @@ void RenderingDeviceGraph::add_draw_list_bind_vertex_buffers(Span<RDD::BufferID>
 	}
 
 	if (instruction->vertex_buffers_count > 0) {
-		draw_instruction_list.stages.set_flag(RDD::PIPELINE_STAGE_VERTEX_INPUT_BIT);
+		_draw_recorder_stages().set_flag(RDD::PIPELINE_STAGE_VERTEX_INPUT_BIT);
 	}
 }
 
@@ -2340,7 +2343,7 @@ void RenderingDeviceGraph::add_draw_list_draw_indirect(RDD::BufferID p_buffer, u
 	instruction->offset = p_offset;
 	instruction->draw_count = p_draw_count;
 	instruction->stride = p_stride;
-	draw_instruction_list.stages.set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+	_draw_recorder_stages().set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
 }
 
 void RenderingDeviceGraph::add_draw_list_draw_indexed_indirect(RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
@@ -2350,7 +2353,7 @@ void RenderingDeviceGraph::add_draw_list_draw_indexed_indirect(RDD::BufferID p_b
 	instruction->offset = p_offset;
 	instruction->draw_count = p_draw_count;
 	instruction->stride = p_stride;
-	draw_instruction_list.stages.set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+	_draw_recorder_stages().set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
 }
 
 void RenderingDeviceGraph::add_draw_list_execute_commands(RDD::CommandBufferID p_command_buffer) {
@@ -2407,6 +2410,17 @@ void RenderingDeviceGraph::add_draw_list_uniform_set_prepare_for_use(RDD::Shader
 }
 
 void RenderingDeviceGraph::add_draw_list_usage(ResourceTracker *p_tracker, ResourceUsage p_usage) {
+	const uint32_t recorder = draw_recorder_index;
+	if (recorder != 0) {
+		// A parallel recorder must not touch the tracker (reset_if_outdated writes it, and the
+		// draw_list_index deduplication is per graph): it records the pair, and add_draw_list_end()
+		// replays it through this same function on the serial side, which deduplicates there.
+		DrawRecorder &r = draw_recorders[recorder - 1];
+		r.trackers.push_back(p_tracker);
+		r.usages.push_back(p_usage);
+		return;
+	}
+
 	p_tracker->reset_if_outdated(tracking_frame);
 
 	if (p_tracker->draw_list_index != draw_instruction_list.index) {
@@ -2430,7 +2444,39 @@ void RenderingDeviceGraph::add_draw_list_usages(VectorView<ResourceTracker *> p_
 	}
 }
 
+void RenderingDeviceGraph::set_draw_recorder_count(uint32_t p_count) {
+	DEV_ASSERT(p_count >= 1 && p_count <= MAX_DRAW_RECORDERS);
+	for (uint32_t i = 1; i < p_count; i++) {
+		draw_recorders[i - 1].clear();
+	}
+	draw_recorder_count = p_count;
+}
+
 void RenderingDeviceGraph::add_draw_list_end() {
+	// Concatenate what the parallel recorders appended, in recorder order, so the instruction
+	// stream is exactly the one a single recorder would have produced for the same element ranges.
+	if (draw_recorder_count > 1) {
+		DEV_ASSERT(draw_recorder_index == 0);
+		for (uint32_t i = 1; i < draw_recorder_count; i++) {
+			DrawRecorder &r = draw_recorders[i - 1];
+			const uint32_t instruction_size = r.data.size();
+			if (instruction_size > 0) {
+				// Every instruction sits at a GRAPH_ALIGN-ed offset and the replay walks the stream
+				// with the same rounding, so a recorder's block has to start aligned as well: its
+				// own offsets are relative to its base.
+				const uint32_t offset = GRAPH_ALIGN(draw_instruction_list.data.size());
+				draw_instruction_list.data.resize(offset + instruction_size);
+				memcpy(&draw_instruction_list.data[offset], r.data.ptr(), instruction_size);
+			}
+			draw_instruction_list.stages = draw_instruction_list.stages | r.stages;
+			for (uint32_t j = 0; j < r.trackers.size(); j++) {
+				add_draw_list_usage(r.trackers[j], r.usages[j]);
+			}
+			r.clear();
+		}
+		draw_recorder_count = 1;
+	}
+
 	FramebufferCache *framebuffer_cache = draw_instruction_list.framebuffer_cache;
 	int32_t command_index;
 	uint32_t clear_values_size = sizeof(RDD::RenderPassClearValue) * draw_instruction_list.attachment_clear_values.size();

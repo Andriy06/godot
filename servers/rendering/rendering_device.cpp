@@ -505,7 +505,7 @@ RID RenderingDevice::tlas_create(uint32_t p_max_instance_count, BitField<Acceler
 Error RenderingDevice::blas_build(RID p_blas) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
-	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER, "Building BLAS is forbidden during creation of a draw list.");
+	ERR_FAIL_COND_V_MSG(draw_lists[0].active, ERR_INVALID_PARAMETER, "Building BLAS is forbidden during creation of a draw list.");
 	ERR_FAIL_COND_V_MSG(compute_list.active, ERR_INVALID_PARAMETER, "Building BLAS is forbidden during creation of a compute list.");
 	ERR_FAIL_COND_V_MSG(raytracing_list.active, ERR_INVALID_PARAMETER, "Building BLAS is forbidden during creation of a raytracing list.");
 
@@ -526,7 +526,7 @@ Error RenderingDevice::blas_build(RID p_blas) {
 Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
-	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER, "Building TLAS is forbidden during creation of a draw list.");
+	ERR_FAIL_COND_V_MSG(draw_lists[0].active, ERR_INVALID_PARAMETER, "Building TLAS is forbidden during creation of a draw list.");
 	ERR_FAIL_COND_V_MSG(compute_list.active, ERR_INVALID_PARAMETER, "Building TLAS is forbidden during creation of a compute list.");
 	ERR_FAIL_COND_V_MSG(raytracing_list.active, ERR_INVALID_PARAMETER, "Building TLAS is forbidden during creation of a raytracing list.");
 
@@ -1125,7 +1125,7 @@ void RenderingDevice::_staging_buffer_execute_required_action(StagingBuffers &p_
 Error RenderingDevice::buffer_copy(RID p_src_buffer, RID p_dst_buffer, uint32_t p_src_offset, uint32_t p_dst_offset, uint32_t p_size) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
-	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER,
+	ERR_FAIL_COND_V_MSG(draw_lists[0].active, ERR_INVALID_PARAMETER,
 			"Copying buffers is forbidden during creation of a draw list.");
 	ERR_FAIL_COND_V_MSG(compute_list.active, ERR_INVALID_PARAMETER,
 			"Copying buffers is forbidden during creation of a compute list.");
@@ -1244,7 +1244,7 @@ Error RenderingDevice::_buffer_update(Buffer *p_buffer, RID p_buffer_id, uint32_
 Error RenderingDevice::buffer_update(RID p_buffer, uint32_t p_offset, uint32_t p_size, const void *p_data, bool p_skip_check) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
-	ERR_FAIL_COND_V_MSG(draw_list.active && !p_skip_check, ERR_INVALID_PARAMETER,
+	ERR_FAIL_COND_V_MSG(draw_lists[0].active && !p_skip_check, ERR_INVALID_PARAMETER,
 			"Updating buffers is forbidden during creation of a draw list.");
 	ERR_FAIL_COND_V_MSG(compute_list.active && !p_skip_check, ERR_INVALID_PARAMETER,
 			"Updating buffers is forbidden during creation of a compute list.");
@@ -1261,7 +1261,7 @@ Error RenderingDevice::buffer_update(RID p_buffer, uint32_t p_offset, uint32_t p
 Error RenderingDevice::driver_callback_add(RDD::DriverCallback p_callback, void *p_userdata, VectorView<CallbackResource> p_resources) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
-	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER,
+	ERR_FAIL_COND_V_MSG(draw_lists[0].active, ERR_INVALID_PARAMETER,
 			"Driver callback is forbidden during creation of a draw list.");
 	ERR_FAIL_COND_V_MSG(compute_list.active, ERR_INVALID_PARAMETER,
 			"Driver callback is forbidden during creation of a compute list.");
@@ -1336,7 +1336,7 @@ Error RenderingDevice::buffer_clear(RID p_buffer, uint32_t p_offset, uint32_t p_
 
 	ERR_FAIL_COND_V_MSG((p_size % 4) != 0, ERR_INVALID_PARAMETER,
 			"Size must be a multiple of four.");
-	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER,
+	ERR_FAIL_COND_V_MSG(draw_lists[0].active, ERR_INVALID_PARAMETER,
 			"Updating buffers in is forbidden during creation of a draw list.");
 	ERR_FAIL_COND_V_MSG(compute_list.active, ERR_INVALID_PARAMETER,
 			"Updating buffers is forbidden during creation of a compute list.");
@@ -2325,7 +2325,7 @@ Error RenderingDevice::_texture_initialize(RID p_texture, uint32_t p_layer, cons
 Error RenderingDevice::texture_update(RID p_texture, uint32_t p_layer, const Vector<uint8_t> &p_data) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
-	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER, "Updating textures is forbidden during creation of a draw list.");
+	ERR_FAIL_COND_V_MSG(draw_lists[0].active, ERR_INVALID_PARAMETER, "Updating textures is forbidden during creation of a draw list.");
 	ERR_FAIL_COND_V_MSG(compute_list.active, ERR_INVALID_PARAMETER, "Updating textures is forbidden during creation of a compute list.");
 	ERR_FAIL_COND_V_MSG(raytracing_list.active, ERR_INVALID_PARAMETER, "Updating textures is forbidden during creation of a raytracing list.");
 
@@ -5651,7 +5651,7 @@ Error RenderingDevice::screen_free(DisplayServerEnums::WindowID p_screen) {
 RenderingDevice::DrawListID RenderingDevice::draw_list_begin_for_screen(DisplayServerEnums::WindowID p_screen, const Color &p_clear_color) {
 	ERR_RENDER_THREAD_GUARD_V(INVALID_ID);
 
-	ERR_FAIL_COND_V_MSG(draw_list.active, INVALID_ID, "Only one draw list can be active at the same time.");
+	ERR_FAIL_COND_V_MSG(draw_lists[0].active, INVALID_ID, "Only one draw list can be active at the same time.");
 	ERR_FAIL_COND_V_MSG(compute_list.active, INVALID_ID, "Only one draw/compute list can be active at the same time.");
 	ERR_FAIL_COND_V_MSG(raytracing_list.active, INVALID_ID, "Only one draw/raytracing list can be active at the same time.");
 
@@ -5689,7 +5689,7 @@ RenderingDevice::DrawListID RenderingDevice::_draw_list_begin_bind(RID p_framebu
 RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, BitField<DrawFlags> p_draw_flags, VectorView<Color> p_clear_color_values, float p_clear_depth_value, uint32_t p_clear_stencil_value, const Rect2 &p_region, uint32_t p_breadcrumb) {
 	ERR_RENDER_THREAD_GUARD_V(INVALID_ID);
 
-	ERR_FAIL_COND_V_MSG(draw_list.active, INVALID_ID, "Only one draw list can be active at the same time.");
+	ERR_FAIL_COND_V_MSG(draw_lists[0].active, INVALID_ID, "Only one draw list can be active at the same time.");
 
 	Framebuffer *framebuffer = framebuffer_owner.get_or_null(p_framebuffer);
 	ERR_FAIL_NULL_V(framebuffer, INVALID_ID);
@@ -5818,6 +5818,7 @@ Error RenderingDevice::draw_list_begin_split(RID p_framebuffer, uint32_t p_split
 #endif
 
 void RenderingDevice::draw_list_set_blend_constants(DrawListID p_list, const Color &p_color) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -5826,6 +5827,7 @@ void RenderingDevice::draw_list_set_blend_constants(DrawListID p_list, const Col
 }
 
 void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_render_pipeline) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -5913,6 +5915,7 @@ void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_re
 }
 
 void RenderingDevice::draw_list_bind_uniform_set(DrawListID p_list, RID p_uniform_set, uint32_t p_index) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 #ifdef DEBUG_ENABLED
@@ -5951,6 +5954,7 @@ void RenderingDevice::draw_list_bind_uniform_set(DrawListID p_list, RID p_unifor
 }
 
 void RenderingDevice::draw_list_bind_vertex_array(DrawListID p_list, RID p_vertex_array) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -5980,6 +5984,7 @@ void RenderingDevice::draw_list_bind_vertex_array(DrawListID p_list, RID p_verte
 }
 
 void RenderingDevice::draw_list_bind_vertex_buffers_format(DrawListID p_list, VertexFormatID p_vertex_format, uint32_t p_vertex_count, const Span<RID> &p_vertex_buffers, const Span<uint64_t> &p_offsets) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6080,6 +6085,7 @@ void RenderingDevice::draw_list_bind_vertex_buffers_format(DrawListID p_list, Ve
 }
 
 void RenderingDevice::draw_list_bind_index_array(DrawListID p_list, RID p_index_array) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6108,6 +6114,7 @@ void RenderingDevice::draw_list_bind_index_array(DrawListID p_list, RID p_index_
 }
 
 void RenderingDevice::draw_list_set_line_width(DrawListID p_list, float p_width) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6116,6 +6123,7 @@ void RenderingDevice::draw_list_set_line_width(DrawListID p_list, float p_width)
 }
 
 void RenderingDevice::draw_list_set_push_constant(DrawListID p_list, const void *p_data, uint32_t p_data_size) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6133,6 +6141,7 @@ void RenderingDevice::draw_list_set_push_constant(DrawListID p_list, const void 
 }
 
 void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint32_t p_instances, uint32_t p_procedural_vertices) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6228,8 +6237,14 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 
 				UniformSet *uniform_set = uniform_set_owner.get_or_null(draw_list.state.sets[i].uniform_set);
 				ERR_FAIL_NULL(uniform_set);
-				_uniform_set_update_shared(uniform_set);
-				_uniform_set_update_clears(uniform_set);
+				if (RDG::draw_recorder_index == 0) {
+					_uniform_set_update_shared(uniform_set);
+					_uniform_set_update_clears(uniform_set);
+				} else if (!uniform_set->shared_textures_to_update.is_empty() || !uniform_set->pending_clear_textures.is_empty()) {
+					// Both record graph commands; hand them to the serial side (draw_list_end()),
+					// which still runs before the draw list command is allocated.
+					draw_list_deferred_uniform_sets[RDG::draw_recorder_index].push_back(draw_list.state.sets[i].uniform_set);
+				}
 
 				draw_graph->add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 				draw_list.state.sets[i].bound = true;
@@ -6296,6 +6311,7 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 }
 
 void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indices, RID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6405,6 +6421,7 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 }
 
 void RenderingDevice::draw_list_set_viewport(DrawListID p_list, const Rect2i &p_rect) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_FAIL_COND(!draw_list.active);
 
 	if (p_rect.get_area() == 0) {
@@ -6416,6 +6433,7 @@ void RenderingDevice::draw_list_set_viewport(DrawListID p_list, const Rect2i &p_
 }
 
 void RenderingDevice::draw_list_enable_scissor(DrawListID p_list, const Rect2 &p_rect) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6433,6 +6451,7 @@ void RenderingDevice::draw_list_enable_scissor(DrawListID p_list, const Rect2 &p
 }
 
 void RenderingDevice::draw_list_disable_scissor(DrawListID p_list) {
+	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6449,7 +6468,7 @@ uint32_t RenderingDevice::draw_list_get_current_pass() {
 RenderingDevice::DrawListID RenderingDevice::draw_list_switch_to_next_pass() {
 	ERR_RENDER_THREAD_GUARD_V(INVALID_ID);
 
-	ERR_FAIL_COND_V(!draw_list.active, INVALID_FORMAT_ID);
+	ERR_FAIL_COND_V(!draw_lists[0].active, INVALID_FORMAT_ID);
 	ERR_FAIL_COND_V(draw_list_current_subpass >= draw_list_subpass_count - 1, INVALID_FORMAT_ID);
 
 	draw_list_current_subpass++;
@@ -6471,24 +6490,67 @@ Error RenderingDevice::draw_list_switch_to_next_pass_split(uint32_t p_splits, Dr
 #endif
 
 void RenderingDevice::_draw_list_start(const Rect2i &p_viewport) {
-	draw_list.viewport = p_viewport;
-	draw_list.active = true;
+	draw_lists[0] = DrawList();
+	draw_lists[0].viewport = p_viewport;
+	draw_lists[0].active = true;
+	draw_list_recorder_count = 1;
+}
+
+void RenderingDevice::draw_list_set_recorder_count(uint32_t p_count) {
+	ERR_RENDER_THREAD_GUARD();
+	ERR_FAIL_COND(!draw_lists[0].active);
+	ERR_FAIL_COND(p_count < 1 || p_count > RDG::MAX_DRAW_RECORDERS);
+
+	// Recorders 1..N-1 start where recorder 0 started: nothing bound, so each element range
+	// re-binds its own pipeline and sets at the head of its share.
+	for (uint32_t i = 1; i < p_count; i++) {
+		draw_lists[i] = DrawList();
+		draw_lists[i].viewport = draw_lists[0].viewport;
+		draw_lists[i].active = true;
+		draw_list_deferred_uniform_sets[i].clear();
+	}
+	draw_list_recorder_count = p_count;
+	draw_graph->set_draw_recorder_count(p_count);
+}
+
+void RenderingDevice::draw_list_bind_recorder(uint32_t p_recorder) {
+	RDG::draw_recorder_index = p_recorder;
+}
+
+void RenderingDevice::_draw_list_process_deferred_uniform_sets() {
+	for (uint32_t i = 1; i < draw_list_recorder_count; i++) {
+		for (RID uniform_set_id : draw_list_deferred_uniform_sets[i]) {
+			UniformSet *uniform_set = uniform_set_owner.get_or_null(uniform_set_id);
+			if (uniform_set != nullptr) {
+				_uniform_set_update_shared(uniform_set);
+				_uniform_set_update_clears(uniform_set);
+			}
+		}
+		draw_list_deferred_uniform_sets[i].clear();
+	}
 }
 
 void RenderingDevice::_draw_list_end(Rect2i *r_last_viewport) {
 	if (r_last_viewport) {
-		*r_last_viewport = draw_list.viewport;
+		*r_last_viewport = draw_lists[0].viewport;
 	}
 
-	draw_list = DrawList();
+	draw_lists[0] = DrawList();
 }
 
 void RenderingDevice::draw_list_end() {
 	ERR_RENDER_THREAD_GUARD();
 
-	ERR_FAIL_COND_MSG(!draw_list.active, "Immediate draw list is already inactive.");
+	ERR_FAIL_COND_MSG(!draw_lists[0].active, "Immediate draw list is already inactive.");
+
+	_draw_list_process_deferred_uniform_sets();
 
 	draw_graph->add_draw_list_end();
+
+	for (uint32_t i = 1; i < draw_list_recorder_count; i++) {
+		draw_lists[i].active = false;
+	}
+	draw_list_recorder_count = 1;
 
 	_draw_list_end();
 
@@ -6518,7 +6580,7 @@ RenderingDevice::RaytracingListID RenderingDevice::raytracing_list_begin() {
 
 	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE), INVALID_ID, "The current rendering device has no raytracing pipeline support.");
 
-	ERR_FAIL_COND_V_MSG(draw_list.active, INVALID_ID, "Only one draw/raytracing list can be active at the same time.");
+	ERR_FAIL_COND_V_MSG(draw_lists[0].active, INVALID_ID, "Only one draw/raytracing list can be active at the same time.");
 	ERR_FAIL_COND_V_MSG(compute_list.active, INVALID_ID, "Only one compute/raytracing list can be active at the same time.");
 	ERR_FAIL_COND_V_MSG(raytracing_list.active, INVALID_ID, "Only one raytracing list can be active at the same time.");
 
@@ -8432,7 +8494,7 @@ void RenderingDevice::_begin_frame(bool p_presented) {
 }
 
 void RenderingDevice::_check_no_open_lists() {
-	if (draw_list.active) {
+	if (draw_lists[0].active) {
 		ERR_PRINT("Found open draw list at the end of the frame, this should never happen (further drawing will likely not work).");
 	}
 
@@ -8837,7 +8899,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		ERR_FAIL_COND_V(err, FAILED);
 	}
 
-	draw_list = DrawList();
+	draw_lists[0] = DrawList();
 	compute_list = ComputeList();
 	raytracing_list = RaytracingList();
 
@@ -8963,7 +9025,7 @@ void RenderingDevice::_free_rids(T &p_owner, const char *p_type) {
 void RenderingDevice::capture_timestamp(const String &p_name) {
 	ERR_RENDER_THREAD_GUARD();
 
-	ERR_FAIL_COND_MSG(draw_list.active && draw_list.state.draw_count > 0, "Capturing timestamps during draw list creation is not allowed. Offending timestamp was: " + p_name);
+	ERR_FAIL_COND_MSG(draw_lists[0].active && draw_lists[0].state.draw_count > 0, "Capturing timestamps during draw list creation is not allowed. Offending timestamp was: " + p_name);
 	ERR_FAIL_COND_MSG(compute_list.active && compute_list.state.dispatch_count > 0, "Capturing timestamps during compute list creation is not allowed. Offending timestamp was: " + p_name);
 	ERR_FAIL_COND_MSG(raytracing_list.active && raytracing_list.state.trace_count > 0, "Capturing timestamps during raytracing list creation is not allowed. Offending timestamp was: " + p_name);
 	ERR_FAIL_COND_MSG(frames[frame].timestamp_count >= max_timestamp_query_elements, vformat("Tried capturing more timestamps than the configured maximum (%d). You can increase this limit in the project settings under 'Debug/Settings' called 'Max Timestamp Query Elements'.", max_timestamp_query_elements));

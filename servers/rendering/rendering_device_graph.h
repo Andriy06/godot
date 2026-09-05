@@ -50,6 +50,9 @@
 
 class RenderingDeviceGraph {
 public:
+	// Upper bound on the parallel recorders of one draw list (see DrawRecorder).
+	enum { MAX_DRAW_RECORDERS = 8 };
+
 	struct RaytracingListInstruction {
 		enum Type {
 			TYPE_NONE,
@@ -298,6 +301,23 @@ private:
 
 	struct RaytracingInstructionList : InstructionList {
 		// No extra contents.
+	};
+
+	// One parallel recorder of the draw list currently open. Recorder 0 is `draw_instruction_list`
+	// itself (the render task); recorders 1..N-1 are filled by ts::parallel_for chunks running under
+	// the same grant and are concatenated into recorder 0, in recorder order, by add_draw_list_end().
+	struct DrawRecorder {
+		LocalVector<uint8_t> data;
+		LocalVector<ResourceTracker *> trackers;
+		LocalVector<ResourceUsage> usages;
+		BitField<RDD::PipelineStageBits> stages = {};
+
+		void clear() {
+			data.clear();
+			trackers.clear();
+			usages.clear();
+			stages.clear();
+		}
 	};
 
 	struct DrawInstructionList : InstructionList {
@@ -833,6 +853,8 @@ private:
 	LocalVector<uint32_t> command_label_offsets;
 	int32_t command_label_index = -1;
 	DrawInstructionList draw_instruction_list;
+	DrawRecorder draw_recorders[MAX_DRAW_RECORDERS - 1];
+	uint32_t draw_recorder_count = 1;
 	ComputeInstructionList compute_instruction_list;
 	RaytracingInstructionList raytracing_instruction_list;
 	uint32_t command_count = 0;
@@ -877,6 +899,14 @@ private:
 	ComputeListInstruction *_allocate_compute_list_instruction(uint32_t p_instruction_size);
 	void _check_discardable_attachment_dependency(ResourceTracker *p_resource_tracker, int32_t p_previous_command_index, int32_t p_command_index);
 	RaytracingListInstruction *_allocate_raytracing_list_instruction(uint32_t p_instruction_size);
+	_FORCE_INLINE_ LocalVector<uint8_t> &_draw_recorder_data() {
+		const uint32_t r = draw_recorder_index;
+		return r == 0 ? draw_instruction_list.data : draw_recorders[r - 1].data;
+	}
+	_FORCE_INLINE_ BitField<RDD::PipelineStageBits> &_draw_recorder_stages() {
+		const uint32_t r = draw_recorder_index;
+		return r == 0 ? draw_instruction_list.stages : draw_recorders[r - 1].stages;
+	}
 	void _add_command_to_graph(ResourceTracker **p_resource_trackers, ResourceUsage *p_resource_usages, uint32_t p_resource_count, int32_t p_command_index, RecordedCommand *r_command);
 	void _add_texture_barrier_to_command(RDD::TextureID p_texture_id, BitField<RDD::BarrierAccessBits> p_src_access, BitField<RDD::BarrierAccessBits> p_dst_access, ResourceUsage p_prev_usage, ResourceUsage p_next_usage, RDD::TextureSubresourceRange p_subresources, LocalVector<RDD::TextureBarrier> &r_barrier_vector, int32_t &r_barrier_index, int32_t &r_barrier_count);
 #if USE_BUFFER_BARRIERS
@@ -982,6 +1012,11 @@ public:
 	void add_draw_list_set_viewport(Rect2i p_rect);
 	void add_draw_list_uniform_set_prepare_for_use(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
 	void add_draw_list_usage(ResourceTracker *p_tracker, ResourceUsage p_usage);
+	// Open `p_count` parallel recorders for the draw list being recorded; reset by add_draw_list_end().
+	void set_draw_recorder_count(uint32_t p_count);
+	// Which recorder the *calling thread* appends to. A parallel_for chunk sets it on entry and
+	// clears it on exit; the render task itself always sees 0.
+	static thread_local uint32_t draw_recorder_index;
 	void add_draw_list_usages(VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages);
 	void add_draw_list_end();
 	void add_texture_clear_color(RDD::TextureID p_dst, ResourceTracker *p_dst_tracker, const Color &p_color, const RDD::TextureSubresourceRange &p_range);

@@ -37,6 +37,7 @@
 #include "core/templates/rb_map.h"
 #include "core/templates/rb_set.h"
 #include "core/templates/rid.h"
+#include "core/os/rw_lock.h"
 #include "core/templates/vector.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_enums.h"
@@ -51,12 +52,17 @@ private:
 	Mutex *compilations_mutex = nullptr;
 	uint32_t *compilations = nullptr;
 	RBMap<uint32_t, RID> hash_map;
+	// The map is looked up per render-list element, and several threads record one draw list
+	// (RenderForwardClustered::_render_list_with_draw_list). Hits take the read lock; the miss path,
+	// which compiles a pipeline and rebalances the tree, takes the write lock.
+	mutable RWLock hash_map_lock;
 	LocalVector<Pair<uint32_t, RID>> compiled_queue;
 	Mutex compiled_queue_mutex;
 	RBSet<uint32_t> compilation_set;
 	HashMap<uint32_t, WorkerThreadPool::TaskID> compilation_tasks;
 	Mutex local_mutex;
 
+	// Callers hold hash_map_lock for writing.
 	bool _add_new_pipelines_to_map() {
 		thread_local Vector<uint32_t> hashes_added;
 		hashes_added.clear();
@@ -177,6 +183,16 @@ public:
 
 	// Retrieve a pipeline. It'll return an empty pipeline if it's not available yet, but it'll be guaranteed to succeed if 'wait for compilation' is true and stall as necessary. Source is just an optional number to aid debugging.
 	RID get_pipeline(const Key &p_key, uint32_t p_key_hash, bool p_wait_for_compilation, RSE::PipelineSource p_source) {
+		{
+			// Fast path: an already compiled pipeline, shared with the other draw-list recorders.
+			RWLockRead read_lock(hash_map_lock);
+			RBMap<uint32_t, RID>::Element *hit = hash_map.find(p_key_hash);
+			if (hit != nullptr) {
+				return hit->value();
+			}
+		}
+
+		RWLockWrite write_lock(hash_map_lock);
 		RBMap<uint32_t, RID>::Element *e = hash_map.find(p_key_hash);
 
 		if (e == nullptr) {
@@ -213,6 +229,7 @@ public:
 	// Delete all cached pipelines. Can stall if background compilation is in progress.
 	void clear_pipelines() {
 		_wait_for_all_pipelines();
+		RWLockWrite write_lock(hash_map_lock);
 		_add_new_pipelines_to_map();
 
 		for (KeyValue<uint32_t, RID> entry : hash_map) {

@@ -30,6 +30,11 @@
 
 #include "render_forward_clustered.h"
 
+#include "core/profiling/profiling.h"
+#include "core/macrame/macrame_render_grant.h"
+#include "ts/parallel_for.h"
+
+
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
@@ -348,6 +353,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 	for (uint32_t i = p_from_element; i < p_to_element; i++) {
 		const GeometryInstanceSurfaceDataCache *surf = p_params->elements[i];
 		const RenderElementInfo &element_info = p_params->element_info[i];
+		// A repeat run may straddle the end of this recorder's element range: draw only its share,
+		// the recorder that starts at p_to_element draws the rest. Without a split this is a no-op.
+		const uint32_t element_repeat = MIN(uint32_t(element_info.repeat), p_to_element - i);
 
 		if (p_pass_mode == PASS_MODE_COLOR && surf->color_pass_inclusion_mask && (p_color_pass_flags & surf->color_pass_inclusion_mask) == 0) {
 			// Some surfaces can be repeated in multiple render lists. We exclude them from being rendered on the color pass based on the
@@ -604,7 +612,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 
 			RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, push_constant_size);
 
-			uint32_t instance_count = surf->owner->instance_count > 1 ? surf->owner->instance_count : element_info.repeat;
+			uint32_t instance_count = surf->owner->instance_count > 1 ? surf->owner->instance_count : element_repeat;
 			if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS) {
 				instance_count /= surf->owner->trail_steps;
 			}
@@ -623,7 +631,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			}
 		}
 
-		i += element_info.repeat - 1; //skip equal elements
+		i += element_repeat - 1; //skip equal elements
 	}
 
 	// Make the actual redraw request
@@ -688,12 +696,94 @@ void RenderForwardClustered::_render_list(RenderingDevice::DrawListID p_draw_lis
 	}
 }
 
+namespace {
+// Binds the calling thread to one parallel recorder of the open draw list for the scope of a chunk,
+// and puts it back on recorder 0 on the way out (including an early return inside _render_list).
+struct DrawRecorderScope {
+	bool had_grant;
+	explicit DrawRecorderScope(uint32_t p_index) :
+			had_grant(MacrameRender::holds_grant()) {
+		// A parallel_for chunk inherits the caller's grants, so this thread really does hold the
+		// render grant for the duration of the chunk; saying so keeps the ~16k RenderingDevice
+		// thread guards a chunk crosses on their thread-local fast path.
+		MacrameRender::set_holds_grant(true);
+		RD::draw_list_bind_recorder(p_index);
+	}
+	~DrawRecorderScope() {
+		RD::draw_list_bind_recorder(0);
+		MacrameRender::set_holds_grant(had_grant);
+	}
+};
+} //namespace
+
+// How many threads record one draw list. 1 restores the serial path; MACRAME_DRAW_RECORDERS caps it.
+uint32_t RenderForwardClustered::_draw_list_recorders_for(uint32_t p_element_count) {
+	static const uint32_t configured = [] {
+		const char *env = std::getenv("MACRAME_DRAW_RECORDERS");
+		uint32_t n = env != nullptr ? uint32_t(atoi(env)) : 4;
+		return CLAMP(n, 1u, uint32_t(RDG::MAX_DRAW_RECORDERS));
+	}();
+	// Escape hatch: MACRAME_DRAW_SPLIT_AFTER=<frames> keeps the recording serial until the frame
+	// counter passes it, which is how the cold-path hazards on this path (lazily created pipelines,
+	// per-input-mask vertex arrays, transfer-worker hand-offs) were separated from steady state.
+	static const uint64_t split_after = [] {
+		const char *env = std::getenv("MACRAME_DRAW_SPLIT_AFTER");
+		return env != nullptr ? uint64_t(atoll(env)) : uint64_t(0);
+	}();
+	if (RSG::rasterizer->get_frame_number() < split_after) {
+		return 1;
+	}
+
+	// Below this the fan-out costs more than the recording it saves.
+	const uint32_t by_size = p_element_count / 128;
+	return MIN(MIN(configured, uint32_t(RDG::MAX_DRAW_RECORDERS) - 1u), MAX(1u, by_size));
+}
+
 void RenderForwardClustered::_render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags, const Vector<Color> &p_clear_color_values, float p_clear_depth_value, uint32_t p_clear_stencil_value, const Rect2 &p_region) {
+	GodotProfileZone("rfc: record draw list");
 	RD::FramebufferFormatID fb_format = RD::get_singleton()->framebuffer_get_format(p_framebuffer);
 	p_params->framebuffer_format = fb_format;
 
 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_framebuffer, p_draw_flags, p_clear_color_values, p_clear_depth_value, p_clear_stencil_value, p_region);
-	_render_list(draw_list, fb_format, p_params, 0, p_params->element_count);
+
+	const uint32_t element_count = p_params->element_count;
+	const uint32_t recorders = _draw_list_recorders_for(element_count);
+	if (recorders > 1) {
+		// Each chunk records a disjoint element range into its own instruction buffer; draw_list_end()
+		// splices them in recorder order. The chunks inherit the render task's grant, so the
+		// RenderingDevice guards they reach still pass.
+		// Recorder 0 stays the render task's own - draw_list_begin() has already appended the
+		// viewport and scissor instructions to it, and _uniform_set_update_shared() runs inline on
+		// it, which allocates *graph commands*. The chunks take recorders 1..N so that no buffer
+		// has two writers; sharing recorder 0 with a chunk corrupted the instruction stream.
+		RD::get_singleton()->draw_list_set_recorder_count(recorders + 1);
+		// MACRAME_DRAW_RECORDERS_SERIAL=1 keeps the split and the splice but runs the recorders on
+		// the calling thread, which separates a fault in the split from a fault in the concurrency.
+		static const bool serial = [] {
+			const char *env = std::getenv("MACRAME_DRAW_RECORDERS_SERIAL");
+			return env != nullptr && env[0] != '0';
+		}();
+		auto record = [this, draw_list, fb_format, p_params, element_count, recorders](int p_recorder) {
+			DrawRecorderScope scope(uint32_t(p_recorder) + 1);
+
+			const uint32_t from = (element_count * uint32_t(p_recorder)) / recorders;
+			const uint32_t to = (element_count * uint32_t(p_recorder + 1)) / recorders;
+			if (from < to) {
+				_render_list(RD::draw_list_recorder_id(draw_list, uint32_t(p_recorder) + 1), fb_format, p_params, from, to);
+			}
+		};
+		if (serial) {
+			for (uint32_t k = 0; k < recorders; k++) {
+				record(int(k));
+			}
+		} else {
+			ts::parallel_for((int)recorders, record,
+					ts::Parallel_options{ .max_workers = int(recorders), .balance = ts::Balance::unbalanced });
+		}
+	} else {
+		_render_list(draw_list, fb_format, p_params, 0, element_count);
+	}
+
 	RD::get_singleton()->draw_list_end();
 }
 

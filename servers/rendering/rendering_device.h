@@ -1510,7 +1510,17 @@ private:
 #endif
 	};
 
-	DrawList draw_list;
+	// One DrawList per parallel recorder of the open draw list. Recorder 0 belongs to the render
+	// task; recorders 1..draw_list_recorder_count-1 belong to ts::parallel_for chunks that record
+	// disjoint element ranges of the same list under the same grant. `_cur_draw_list()` resolves
+	// the calling thread's one through RenderingDeviceGraph::draw_recorder_index.
+	DrawList draw_lists[RDG::MAX_DRAW_RECORDERS];
+	uint32_t draw_list_recorder_count = 1;
+	// Uniform sets a parallel recorder found needing a shared-texture or pending-clear fix-up.
+	// Those record graph commands, so they are replayed on the serial side at draw_list_end().
+	LocalVector<RID> draw_list_deferred_uniform_sets[RDG::MAX_DRAW_RECORDERS];
+
+	_FORCE_INLINE_ DrawList &_cur_draw_list() { return draw_lists[RDG::draw_recorder_index]; }
 	uint32_t draw_list_subpass_count = 0;
 #ifdef DEBUG_ENABLED
 	FramebufferFormatID draw_list_framebuffer_format = INVALID_ID;
@@ -1520,6 +1530,7 @@ private:
 	LocalVector<RID> draw_list_bound_textures;
 
 	void _draw_list_start(const Rect2i &p_viewport);
+	void _draw_list_process_deferred_uniform_sets();
 	void _draw_list_end(Rect2i *r_last_viewport = nullptr);
 
 public:
@@ -1583,6 +1594,14 @@ public:
 	DrawListID draw_list_switch_to_next_pass();
 
 	void draw_list_end();
+
+	// Split the recording of the open draw list across p_count threads. Each recorder gets its own
+	// DrawListID (draw_list_recorder_id) and its own instruction buffer; draw_list_end() splices
+	// them together in recorder order. Must be called right after draw_list_begin(), and every
+	// recorder thread must call draw_list_bind_recorder() around its share.
+	void draw_list_set_recorder_count(uint32_t p_count);
+	static _FORCE_INLINE_ DrawListID draw_list_recorder_id(DrawListID p_list, uint32_t p_recorder) { return p_list | DrawListID(p_recorder); }
+	static void draw_list_bind_recorder(uint32_t p_recorder);
 
 private:
 	/**************************/
