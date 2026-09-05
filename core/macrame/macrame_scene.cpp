@@ -114,15 +114,25 @@ struct FrameGraph {
 	std::string frame_names[MacrameScene::SHARD_COUNT];
 };
 
-struct State {
-	std::vector<std::unique_ptr<ts::Guarded<SceneShardToken>>> shards;
-	std::unique_ptr<ts::Guarded<NavGrantToken>> nav_guard;
-	FrameState frame;
+// The compiled graphs, held apart from the rest of the state because they die first. A
+// `Static_task_graph` names the guarded objects its nodes take grants on, and Macrame makes
+// destroying one of those objects while a compiled graph still references it fatal. Two of
+// them - the physics space (`PhysicsServer3DWrapMT`) and the render outputs - belong to
+// objects that `Main::cleanup` destroys long before `MacrameRuntime::finish`, so the graphs
+// are torn down at the end of the main loop instead (`MacrameScene::finish_graphs`).
+struct Graphs {
 	FrameGraph tick_frame;
 	FrameGraph plain_frame;
 	FrameGraph tick_only;
 	PhaseGraph physics_graph;
 	PhaseGraph process_graph;
+};
+
+struct State {
+	std::vector<std::unique_ptr<ts::Guarded<SceneShardToken>>> shards;
+	std::unique_ptr<ts::Guarded<NavGrantToken>> nav_guard;
+	FrameState frame;
+	std::unique_ptr<Graphs> graphs = std::make_unique<Graphs>();
 	std::vector<SceneShardToken *> shard_ptrs; // Stable addresses of the guarded tokens, for the harness.
 	std::unique_ptr<ts::Guarded<SceneShardToken>> main_shard;
 	SceneShardToken *main_ptr = nullptr;
@@ -163,35 +173,45 @@ void MacrameScene::init() {
 	state->frame.frame_buckets.resize(SHARD_COUNT);
 	// One compiled graph per frame shape (see macrame_scene.h); built lazily, because the
 	// physics space's Guarded only exists once the physics server has started.
-	state->tick_frame.with_tick = true;
-	state->tick_frame.with_frame = true;
-	state->tick_frame.dot_name = "macrame_tick_frame.dot";
-	state->tick_frame.svg_name = "macrame_tick_frame_avg.svg";
-	state->plain_frame.with_frame = true;
-	state->plain_frame.dot_name = "macrame_plain_frame.dot";
-	state->plain_frame.svg_name = "macrame_plain_frame_avg.svg";
-	state->tick_only.with_tick = true;
-	state->tick_only.dot_name = "macrame_tick_only.dot";
-	state->tick_only.svg_name = "macrame_tick_only_avg.svg";
+	Graphs &g = *state->graphs;
+	g.tick_frame.with_tick = true;
+	g.tick_frame.with_frame = true;
+	g.tick_frame.dot_name = "macrame_tick_frame.dot";
+	g.tick_frame.svg_name = "macrame_tick_frame_avg.svg";
+	g.plain_frame.with_frame = true;
+	g.plain_frame.dot_name = "macrame_plain_frame.dot";
+	g.plain_frame.svg_name = "macrame_plain_frame_avg.svg";
+	g.tick_only.with_tick = true;
+	g.tick_only.dot_name = "macrame_tick_only.dot";
+	g.tick_only.svg_name = "macrame_tick_only_avg.svg";
 	print_verbose(vformat("Macrame: %d scene shards.", SHARD_COUNT));
 }
 
-void MacrameScene::finish() {
-	if (state) {
-		const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
-		if (!dir.is_empty()) {
-			for (FrameGraph *fg : { &state->tick_frame, &state->plain_frame, &state->tick_only }) {
-				if (fg->built && !fg->written) {
-					_write_frame_trace(*fg);
-				}
+void MacrameScene::finish_graphs() {
+	if (!state || !state->graphs) {
+		return;
+	}
+	Graphs &g = *state->graphs;
+	const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
+	if (!dir.is_empty()) {
+		for (FrameGraph *fg : { &g.tick_frame, &g.plain_frame, &g.tick_only }) {
+			if (fg->built && !fg->written) {
+				_write_frame_trace(*fg);
 			}
-			for (PhaseGraph *pg : { &state->physics_graph, &state->process_graph }) {
-				if (pg->built && !pg->written) {
-					_write_phase_trace(*pg);
-				}
+		}
+		for (PhaseGraph *pg : { &g.physics_graph, &g.process_graph }) {
+			if (pg->built && !pg->written) {
+				_write_phase_trace(*pg);
 			}
 		}
 	}
+	// Before the physics server and the renderer go: a compiled graph outliving a guarded
+	// object it names is fatal in Macrame, and both of those objects die inside `Main::cleanup`.
+	state->graphs.reset();
+}
+
+void MacrameScene::finish() {
+	finish_graphs(); // A no-op when the main loop already ran it; a safety net when it did not.
 	delete state;
 	state = nullptr;
 }
@@ -313,8 +333,8 @@ void MacrameScene::run_groups(SceneTree *p_tree, void **p_groups, int p_group_co
 	}
 
 	static const bool use_graph = OS::get_singleton()->get_environment("MACRAME_STATIC_GRAPH") != "0";
-	if (use_graph) {
-		PhaseGraph &pg = p_physics ? state->physics_graph : state->process_graph;
+	if (use_graph && state->graphs) {
+		PhaseGraph &pg = p_physics ? state->graphs->physics_graph : state->graphs->process_graph;
 		if (!pg.built) {
 			_build_phase_graph(pg, p_physics, space);
 		}
@@ -461,7 +481,7 @@ void _frame_run(FrameGraph &fg, SceneTree *p_tree) {
 
 bool MacrameScene::frame_graph_enabled() {
 	static const bool enabled = OS::get_singleton()->get_environment("MACRAME_FRAME_GRAPH") != "0";
-	return enabled && state != nullptr && MacramePhysics::get_guarded() != nullptr;
+	return enabled && state != nullptr && state->graphs != nullptr && MacramePhysics::get_guarded() != nullptr;
 }
 
 void MacrameScene::frame_set_capturing(bool p_capturing) {
@@ -476,25 +496,28 @@ void MacrameScene::frame_set_tick(double p_step) {
 
 void MacrameScene::frame_execute_tick(SceneTree *p_tree) {
 	ERR_FAIL_NULL(state);
+	ERR_FAIL_NULL(state->graphs);
 	GodotProfileZone("Macrame: tick_only graph");
-	_frame_run(state->tick_only, p_tree);
+	_frame_run(state->graphs->tick_only, p_tree);
 }
 
 void MacrameScene::frame_execute(SceneTree *p_tree, bool p_with_tick) {
 	ERR_FAIL_NULL(state);
+	ERR_FAIL_NULL(state->graphs);
 	if (p_with_tick) {
 		GodotProfileZone("Macrame: tick_frame graph");
-		_frame_run(state->tick_frame, p_tree);
+		_frame_run(state->graphs->tick_frame, p_tree);
 	} else {
 		// No tick was captured this iteration: only the process shards.
 		GodotProfileZone("Macrame: plain_frame graph");
-		_frame_run(state->plain_frame, p_tree);
+		_frame_run(state->graphs->plain_frame, p_tree);
 	}
 }
 
 #else
 
 void MacrameScene::init() {}
+void MacrameScene::finish_graphs() {}
 void MacrameScene::finish() {}
 bool MacrameScene::is_enabled() { return false; }
 int MacrameScene::assign_shard() { return -1; }

@@ -5299,6 +5299,17 @@ void Main::cleanup(bool p_force) {
 
 	OS::get_singleton()->delete_main_loop();
 
+	// No main loop, no more frames: retire the pipelined machinery here, while every object it
+	// refers to is still alive. The compiled frame graphs name guarded objects owned by the
+	// physics server and the renderer, and the renderer's staged commands call into the servers
+	// and their modules; both of those are destroyed below.
+	MacrameRuntime::finish_graphs();
+#ifdef MACRAME_ENABLED
+	if (rendering_server) {
+		static_cast<RenderingServerDefault *>(rendering_server)->macrame_drain_commands();
+	}
+#endif
+
 	OS::get_singleton()->_cmdline.clear();
 	OS::get_singleton()->_user_args.clear();
 	OS::get_singleton()->_execpath = "";

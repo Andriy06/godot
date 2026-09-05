@@ -621,4 +621,14 @@ RenderingServerDefault::RenderingServerDefault(bool p_create_thread) {
 }
 
 RenderingServerDefault::~RenderingServerDefault() {
+#ifdef MACRAME_ENABLED
+	// The RenderingDevice outlives the rendering server: `Main::cleanup` deletes the display
+	// server (which frees its screens, and that records into the device) right after this. Both
+	// hooks reach back into this object - the query dereferences the singleton, the token points
+	// inside `command_queue` - so they have to go with it. With neither set,
+	// `MacrameRender::check_access()` grants the direct path, which is what the single-threaded
+	// tail of the shutdown is.
+	MacrameRender::set_access_query(nullptr);
+	MacrameRender::set_token(nullptr);
+#endif
 }

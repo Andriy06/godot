@@ -40,6 +40,10 @@ public:
 	// pool exists and before any server is created. `p_workers` <= 0 means hardware
 	// concurrency.
 	static void init(int p_workers);
+	// The main loop is gone, so no frame graph will run again: destroy the compiled graphs while
+	// the guarded objects they name (the physics space, the render outputs) are still alive.
+	// `Main::cleanup` frees those objects well before `finish()`.
+	static void finish_graphs();
 	static void finish();
 	static bool is_enabled();
 	static int get_worker_count();

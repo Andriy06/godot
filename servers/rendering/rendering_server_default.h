@@ -1328,6 +1328,18 @@ public:
 	virtual bool has_changed() const override;
 	virtual void init() override;
 	virtual void finish() override;
+#ifdef MACRAME_ENABLED
+	// Shutdown drain, called once the main loop is gone. `sync()` deliberately does nothing
+	// while a draw is in flight (joining it every frame would serialize the simulation behind
+	// rendering), so without this the commands the scene's teardown stages - freeing viewports,
+	// scenarios, instances - would first be applied inside `finish()`, by which point
+	// `Main::cleanup` has unloaded the server modules those commands call into
+	// (`RendererSceneOcclusionCull::get_singleton()` is one, and it is not null-checked).
+	void macrame_drain_commands() {
+		command_queue.wait();
+		command_queue.sync();
+	}
+#endif
 	virtual void tick() override;
 	virtual void pre_draw(bool p_will_draw) override;
 

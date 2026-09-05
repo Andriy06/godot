@@ -60,6 +60,11 @@ namespace MacrameScene {
 constexpr int SHARD_COUNT = 32; // Fixed. MACRAME_SHARDS caps how many receive groups. Measured at 500 NPCs on a 22-thread laptop: 16 and 32 within noise, 64 worse (per-call cost grows with concurrency).
 
 void init();
+// Destroys the compiled frame and phase graphs (writing their traces first). Must run while
+// every guarded object they name is still alive: `Main::cleanup` destroys the physics server
+// and the renderer long before `MacrameRuntime::finish`, and a `Static_task_graph` outliving
+// one of its guarded objects is fatal. Called at the end of the main loop; idempotent.
+void finish_graphs();
 void finish();
 bool is_enabled();
 

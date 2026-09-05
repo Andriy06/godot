@@ -71,8 +71,9 @@ void *operator new(size_t p_size, void *(*p_allocfunc)(size_t p_size)) {
 void *Memory::alloc_aligned_static(size_t p_bytes, size_t p_alignment) {
 	DEV_ASSERT(Math::is_power_of_2(p_alignment));
 
+	// Must come from the same allocator free_aligned_static() returns it to (GODOT_FREE).
 	void *p1, *p2;
-	if ((p1 = (void *)malloc(p_bytes + p_alignment - 1 + sizeof(uint32_t))) == nullptr) {
+	if ((p1 = (void *)GODOT_MALLOC(p_bytes + p_alignment - 1 + sizeof(uint32_t))) == nullptr) {
 		return nullptr;
 	}
 	GodotProfileAlloc(p1, p_bytes + p_alignment - 1 + sizeof(uint32_t));

@@ -90,6 +90,10 @@ void MacrameRuntime::init(int p_workers) {
 #endif
 }
 
+void MacrameRuntime::finish_graphs() {
+	MacrameScene::finish_graphs();
+}
+
 void MacrameRuntime::finish() {
 #ifdef MACRAME_ENABLED
 	MacrameRenderSnapshot::finish();
