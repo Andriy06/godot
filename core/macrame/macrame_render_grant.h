@@ -71,6 +71,28 @@ void set_holds_grant(bool p_holds);
 void set_access_query(bool (*p_query)());
 void set_token(RenderGrantToken *p_token);
 bool check_access();
+
+// For a body that already holds the render grant by inheritance rather than by declaring it: a
+// `ts::parallel_for` chunk launched from inside the draw task runs under the calling task's grants,
+// so `ts::access_check` on the render token passes for the chunk and every RenderingDevice guard
+// would let it through on the harness path. What the chunk does not have is the thread-local mirror
+// `holds_grant()` reads, which is the fast path those guards take first - and one chunk crosses
+// ~16k of them.
+//
+// This scope sets the mirror for the life of the chunk and restores it on the way out. It is not a
+// correctness device and it grants nothing: it exists only because Macrame has no non-faulting
+// "do I hold this grant?" query, so an inheriting body cannot compute the mirror for itself. That
+// is an API gap; given such a query this type collapses into it.
+struct Inherited_grant_scope {
+	const bool previous;
+	Inherited_grant_scope() :
+			previous(holds_grant()) {
+		set_holds_grant(true);
+	}
+	~Inherited_grant_scope() { set_holds_grant(previous); }
+	Inherited_grant_scope(const Inherited_grant_scope &) = delete;
+	Inherited_grant_scope &operator=(const Inherited_grant_scope &) = delete;
+};
 } // namespace MacrameRender
 
 // The split draw's second guarded object is `RenderingDeviceSubmit` itself: the frame slot being

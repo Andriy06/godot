@@ -306,6 +306,8 @@ private:
 	// One parallel recorder of the draw list currently open. Recorder 0 is `draw_instruction_list`
 	// itself (the render task); recorders 1..N-1 are filled by ts::parallel_for chunks running under
 	// the same grant and are concatenated into recorder 0, in recorder order, by add_draw_list_end().
+	// A chunk names its recorder in every call (see `p_recorder`), so two chunks never touch the
+	// same buffer and nothing about the recording depends on which thread runs it.
 	struct DrawRecorder {
 		LocalVector<uint8_t> data;
 		LocalVector<ResourceTracker *> trackers;
@@ -895,17 +897,15 @@ private:
 	int32_t _add_to_slice_read_list(int32_t p_command_index, Rect2i p_subresources, int32_t p_list_index);
 	int32_t _add_to_write_list(int32_t p_command_index, Rect2i p_subresources, int32_t p_list_index, bool p_partial_coverage);
 	RecordedCommand *_allocate_command(uint32_t p_command_size, int32_t &r_command_index);
-	DrawListInstruction *_allocate_draw_list_instruction(uint32_t p_instruction_size);
+	DrawListInstruction *_allocate_draw_list_instruction(uint32_t p_recorder, uint32_t p_instruction_size);
 	ComputeListInstruction *_allocate_compute_list_instruction(uint32_t p_instruction_size);
 	void _check_discardable_attachment_dependency(ResourceTracker *p_resource_tracker, int32_t p_previous_command_index, int32_t p_command_index);
 	RaytracingListInstruction *_allocate_raytracing_list_instruction(uint32_t p_instruction_size);
-	_FORCE_INLINE_ LocalVector<uint8_t> &_draw_recorder_data() {
-		const uint32_t r = draw_recorder_index;
-		return r == 0 ? draw_instruction_list.data : draw_recorders[r - 1].data;
+	_FORCE_INLINE_ LocalVector<uint8_t> &_draw_recorder_data(uint32_t p_recorder) {
+		return p_recorder == 0 ? draw_instruction_list.data : draw_recorders[p_recorder - 1].data;
 	}
-	_FORCE_INLINE_ BitField<RDD::PipelineStageBits> &_draw_recorder_stages() {
-		const uint32_t r = draw_recorder_index;
-		return r == 0 ? draw_instruction_list.stages : draw_recorders[r - 1].stages;
+	_FORCE_INLINE_ BitField<RDD::PipelineStageBits> &_draw_recorder_stages(uint32_t p_recorder) {
+		return p_recorder == 0 ? draw_instruction_list.stages : draw_recorders[p_recorder - 1].stages;
 	}
 	void _add_command_to_graph(ResourceTracker **p_resource_trackers, ResourceUsage *p_resource_usages, uint32_t p_resource_count, int32_t p_command_index, RecordedCommand *r_command);
 	void _add_texture_barrier_to_command(RDD::TextureID p_texture_id, BitField<RDD::BarrierAccessBits> p_src_access, BitField<RDD::BarrierAccessBits> p_dst_access, ResourceUsage p_prev_usage, ResourceUsage p_next_usage, RDD::TextureSubresourceRange p_subresources, LocalVector<RDD::TextureBarrier> &r_barrier_vector, int32_t &r_barrier_index, int32_t &r_barrier_count);
@@ -993,31 +993,31 @@ public:
 	void add_compute_list_end();
 	void add_draw_list_begin(FramebufferCache *p_framebuffer_cache, Rect2i p_region, VectorView<AttachmentOperation> p_attachment_operations, VectorView<RDD::RenderPassClearValue> p_attachment_clear_values, BitField<RDD::PipelineStageBits> p_stages, uint32_t p_breadcrumb = 0, bool p_split_cmd_buffer = false);
 	void add_draw_list_begin(RDD::RenderPassID p_render_pass, RDD::FramebufferID p_framebuffer, Rect2i p_region, VectorView<AttachmentOperation> p_attachment_operations, VectorView<RDD::RenderPassClearValue> p_attachment_clear_values, BitField<RDD::PipelineStageBits> p_stages, uint32_t p_breadcrumb = 0, bool p_split_cmd_buffer = false);
-	void add_draw_list_bind_index_buffer(RDD::BufferID p_buffer, RDD::IndexBufferFormat p_format, uint32_t p_offset);
-	void add_draw_list_bind_pipeline(RDD::PipelineID p_pipeline, BitField<RDD::PipelineStageBits> p_pipeline_stage_bits);
-	void add_draw_list_bind_uniform_set(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
-	void add_draw_list_bind_uniform_sets(RDD::ShaderID p_shader, VectorView<RDD::UniformSetID> p_uniform_set, uint32_t p_first_index, uint32_t p_set_count);
-	void add_draw_list_bind_vertex_buffers(Span<RDD::BufferID> p_vertex_buffers, Span<uint64_t> p_vertex_buffer_offsets);
-	void add_draw_list_clear_attachments(VectorView<RDD::AttachmentClear> p_attachments_clear, VectorView<Rect2i> p_attachments_clear_rect);
-	void add_draw_list_draw(uint32_t p_vertex_count, uint32_t p_instance_count);
-	void add_draw_list_draw_indexed(uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index);
-	void add_draw_list_draw_indirect(RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride);
-	void add_draw_list_draw_indexed_indirect(RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride);
-	void add_draw_list_execute_commands(RDD::CommandBufferID p_command_buffer);
-	void add_draw_list_next_subpass(RDD::CommandBufferType p_command_buffer_type);
-	void add_draw_list_set_blend_constants(const Color &p_color);
-	void add_draw_list_set_line_width(float p_width);
-	void add_draw_list_set_push_constant(RDD::ShaderID p_shader, const void *p_data, uint32_t p_data_size);
-	void add_draw_list_set_scissor(Rect2i p_rect);
-	void add_draw_list_set_viewport(Rect2i p_rect);
-	void add_draw_list_uniform_set_prepare_for_use(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
-	void add_draw_list_usage(ResourceTracker *p_tracker, ResourceUsage p_usage);
+	void add_draw_list_bind_index_buffer(uint32_t p_recorder, RDD::BufferID p_buffer, RDD::IndexBufferFormat p_format, uint32_t p_offset);
+	void add_draw_list_bind_pipeline(uint32_t p_recorder, RDD::PipelineID p_pipeline, BitField<RDD::PipelineStageBits> p_pipeline_stage_bits);
+	void add_draw_list_bind_uniform_set(uint32_t p_recorder, RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
+	void add_draw_list_bind_uniform_sets(uint32_t p_recorder, RDD::ShaderID p_shader, VectorView<RDD::UniformSetID> p_uniform_set, uint32_t p_first_index, uint32_t p_set_count);
+	void add_draw_list_bind_vertex_buffers(uint32_t p_recorder, Span<RDD::BufferID> p_vertex_buffers, Span<uint64_t> p_vertex_buffer_offsets);
+	void add_draw_list_clear_attachments(uint32_t p_recorder, VectorView<RDD::AttachmentClear> p_attachments_clear, VectorView<Rect2i> p_attachments_clear_rect);
+	void add_draw_list_draw(uint32_t p_recorder, uint32_t p_vertex_count, uint32_t p_instance_count);
+	void add_draw_list_draw_indexed(uint32_t p_recorder, uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index);
+	void add_draw_list_draw_indirect(uint32_t p_recorder, RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride);
+	void add_draw_list_draw_indexed_indirect(uint32_t p_recorder, RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride);
+	void add_draw_list_execute_commands(uint32_t p_recorder, RDD::CommandBufferID p_command_buffer);
+	void add_draw_list_next_subpass(uint32_t p_recorder, RDD::CommandBufferType p_command_buffer_type);
+	void add_draw_list_set_blend_constants(uint32_t p_recorder, const Color &p_color);
+	void add_draw_list_set_line_width(uint32_t p_recorder, float p_width);
+	void add_draw_list_set_push_constant(uint32_t p_recorder, RDD::ShaderID p_shader, const void *p_data, uint32_t p_data_size);
+	void add_draw_list_set_scissor(uint32_t p_recorder, Rect2i p_rect);
+	void add_draw_list_set_viewport(uint32_t p_recorder, Rect2i p_rect);
+	void add_draw_list_uniform_set_prepare_for_use(uint32_t p_recorder, RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
+	void add_draw_list_usage(uint32_t p_recorder, ResourceTracker *p_tracker, ResourceUsage p_usage);
+	void add_draw_list_usages(uint32_t p_recorder, VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages);
 	// Open `p_count` parallel recorders for the draw list being recorded; reset by add_draw_list_end().
+	// Which recorder a call appends to is the `p_recorder` argument every add_draw_list_* entry
+	// point takes: RenderingDevice reads it out of the DrawListID the caller passed, so the choice
+	// travels with the data instead of with the thread.
 	void set_draw_recorder_count(uint32_t p_count);
-	// Which recorder the *calling thread* appends to. A parallel_for chunk sets it on entry and
-	// clears it on exit; the render task itself always sees 0.
-	static thread_local uint32_t draw_recorder_index;
-	void add_draw_list_usages(VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages);
 	void add_draw_list_end();
 	void add_texture_clear_color(RDD::TextureID p_dst, ResourceTracker *p_dst_tracker, const Color &p_color, const RDD::TextureSubresourceRange &p_range);
 	void add_texture_clear_depth_stencil(RDD::TextureID p_dst, ResourceTracker *p_dst_tracker, float p_depth, uint8_t p_stencil, const RDD::TextureSubresourceRange &p_range);

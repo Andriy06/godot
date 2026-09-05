@@ -319,6 +319,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 	RendererRD::ParticlesStorage *particles_storage = RendererRD::ParticlesStorage::get_singleton();
 	RD::DrawListID draw_list = p_draw_list;
 	RD::FramebufferFormatID framebuffer_format = p_framebuffer_Format;
+	// Which of the parallel recorders of the open draw list this call records into. It travels in
+	// the DrawListID, so nothing here depends on which thread runs it. 0 is the serial recorder.
+	const uint32_t recorder = RD::draw_list_recorder_of(p_draw_list);
 
 	//global scope bindings
 	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, render_base_uniform_set, SCENE_UNIFORM_SET);
@@ -537,7 +540,15 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 
 			if (shader != prev_shader || pipeline_hash != prev_pipeline_hash) {
 				RSE::PipelineSource pipeline_source = pipeline_key.ubershader ? RSE::PIPELINE_SOURCE_DRAW : RSE::PIPELINE_SOURCE_SPECIALIZATION;
-				pipeline_rd = shader->pipeline_hash_map.get_pipeline(pipeline_key, pipeline_hash, pipeline_key.ubershader, pipeline_source);
+				if (recorder == 0) {
+					pipeline_rd = shader->pipeline_hash_map.get_pipeline(pipeline_key, pipeline_hash, pipeline_key.ubershader, pipeline_source);
+				} else if (!shader->pipeline_hash_map.find_pipeline(pipeline_hash, pipeline_rd)) {
+					// The map is read-only while the recorders run. Record the miss for the serial
+					// tail of _render_list_with_draw_list and skip the element for this frame; the
+					// next frame hits, and the frame after a miss records serially anyway.
+					pipeline_rd = RID();
+					draw_pipeline_misses[recorder].push_back({ shader, pipeline_key, pipeline_hash, pipeline_source, bool(pipeline_key.ubershader) });
+				}
 
 				if (pipeline_rd.is_valid()) {
 					pipeline_valid = true;
@@ -696,47 +707,51 @@ void RenderForwardClustered::_render_list(RenderingDevice::DrawListID p_draw_lis
 	}
 }
 
-namespace {
-// Binds the calling thread to one parallel recorder of the open draw list for the scope of a chunk,
-// and puts it back on recorder 0 on the way out (including an early return inside _render_list).
-struct DrawRecorderScope {
-	bool had_grant;
-	explicit DrawRecorderScope(uint32_t p_index) :
-			had_grant(MacrameRender::holds_grant()) {
-		// A parallel_for chunk inherits the caller's grants, so this thread really does hold the
-		// render grant for the duration of the chunk; saying so keeps the ~16k RenderingDevice
-		// thread guards a chunk crosses on their thread-local fast path.
-		MacrameRender::set_holds_grant(true);
-		RD::draw_list_bind_recorder(p_index);
-	}
-	~DrawRecorderScope() {
-		RD::draw_list_bind_recorder(0);
-		MacrameRender::set_holds_grant(had_grant);
-	}
-};
-} //namespace
-
 // How many threads record one draw list. 1 restores the serial path; MACRAME_DRAW_RECORDERS caps it.
-uint32_t RenderForwardClustered::_draw_list_recorders_for(uint32_t p_element_count) {
+uint32_t RenderForwardClustered::_draw_list_recorders_for(uint32_t p_element_count) const {
 	static const uint32_t configured = [] {
 		const char *env = std::getenv("MACRAME_DRAW_RECORDERS");
 		uint32_t n = env != nullptr ? uint32_t(atoi(env)) : 4;
 		return CLAMP(n, 1u, uint32_t(RDG::MAX_DRAW_RECORDERS));
 	}();
-	// Escape hatch: MACRAME_DRAW_SPLIT_AFTER=<frames> keeps the recording serial until the frame
-	// counter passes it, which is how the cold-path hazards on this path (lazily created pipelines,
-	// per-input-mask vertex arrays, transfer-worker hand-offs) were separated from steady state.
+	// The cold-path hazards on this path (lazily created pipelines, per-input-mask vertex arrays,
+	// transfer-worker hand-offs) all live in the first frames, so the recording stays serial until
+	// the frame counter passes this. MACRAME_DRAW_SPLIT_AFTER overrides it.
 	static const uint64_t split_after = [] {
 		const char *env = std::getenv("MACRAME_DRAW_SPLIT_AFTER");
-		return env != nullptr ? uint64_t(atoll(env)) : uint64_t(0);
+		return env != nullptr ? uint64_t(atoll(env)) : uint64_t(60);
 	}();
-	if (RSG::rasterizer->get_frame_number() < split_after) {
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	if (frame < split_after) {
+		return 1;
+	}
+
+	// A recorder that missed the pipeline map skipped its element for that frame. Record serially
+	// through the frame after a miss, so the frame that fills the map draws nothing with holes.
+	if (frame <= draw_pipeline_miss_frame + 1) {
 		return 1;
 	}
 
 	// Below this the fan-out costs more than the recording it saves.
 	const uint32_t by_size = p_element_count / 128;
 	return MIN(MIN(configured, uint32_t(RDG::MAX_DRAW_RECORDERS) - 1u), MAX(1u, by_size));
+}
+
+// The serial half of the pipeline-map contract: everything the recorders could not look up, run
+// through the ordinary get_pipeline() now that nothing else is touching the map. Returns how many
+// there were; in steady state that is zero every frame.
+uint32_t RenderForwardClustered::_resolve_pipeline_misses(uint32_t p_recorder_count) {
+	uint32_t count = 0;
+	for (uint32_t i = 1; i <= p_recorder_count; i++) {
+		for (const PipelineMiss &miss : draw_pipeline_misses[i]) {
+			// The same call the serial recorder would have made, with the wait flag it would have
+			// passed: _add_new_pipelines_to_map(), then compile + wait + insert as required.
+			miss.shader->pipeline_hash_map.get_pipeline(miss.key, miss.key_hash, miss.wait_for_compilation, miss.source);
+			count++;
+		}
+		draw_pipeline_misses[i].clear();
+	}
+	return count;
 }
 
 void RenderForwardClustered::_render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags, const Vector<Color> &p_clear_color_values, float p_clear_depth_value, uint32_t p_clear_stencil_value, const Rect2 &p_region) {
@@ -764,7 +779,7 @@ void RenderForwardClustered::_render_list_with_draw_list(RenderListParameters *p
 			return env != nullptr && env[0] != '0';
 		}();
 		auto record = [this, draw_list, fb_format, p_params, element_count, recorders](int p_recorder) {
-			DrawRecorderScope scope(uint32_t(p_recorder) + 1);
+			MacrameRender::Inherited_grant_scope grant_scope;
 
 			const uint32_t from = (element_count * uint32_t(p_recorder)) / recorders;
 			const uint32_t to = (element_count * uint32_t(p_recorder + 1)) / recorders;
@@ -779,6 +794,11 @@ void RenderForwardClustered::_render_list_with_draw_list(RenderListParameters *p
 		} else {
 			ts::parallel_for((int)recorders, record,
 					ts::Parallel_options{ .max_workers = int(recorders), .balance = ts::Balance::unbalanced });
+		}
+
+		// The recorders have joined: the pipeline map has one writer again.
+		if (_resolve_pipeline_misses(recorders) > 0) {
+			draw_pipeline_miss_frame = RSG::rasterizer->get_frame_number();
 		}
 	} else {
 		_render_list(draw_list, fb_format, p_params, 0, element_count);

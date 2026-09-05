@@ -5676,8 +5676,8 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin_for_screen(DisplayS
 	RDD::RenderPassID render_pass = driver->swap_chain_get_render_pass(sc_it->value);
 	draw_graph->add_draw_list_begin(render_pass, fb_it->value, viewport, RDG::ATTACHMENT_OPERATION_CLEAR, clear_value, RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, RDD::BreadcrumbMarker::BLIT_PASS, split_swapchain_into_its_own_cmd_buffer);
 
-	draw_graph->add_draw_list_set_viewport(viewport);
-	draw_graph->add_draw_list_set_scissor(viewport);
+	draw_graph->add_draw_list_set_viewport(0, viewport);
+	draw_graph->add_draw_list_set_scissor(0, viewport);
 
 	return int64_t(ID_TYPE_DRAW_LIST) << ID_BASE_SHIFT;
 }
@@ -5782,7 +5782,7 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, 
 	}
 
 	draw_graph->add_draw_list_begin(framebuffer->framebuffer_cache, Rect2i(viewport_offset, viewport_size), operations, clear_values, stages, p_breadcrumb);
-	draw_graph->add_draw_list_usages(resource_trackers, resource_usages);
+	draw_graph->add_draw_list_usages(0, resource_trackers, resource_usages);
 
 	// Mark textures as bound.
 	draw_list_bound_textures.clear();
@@ -5805,8 +5805,8 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, 
 	draw_list_subpass_count = framebuffer_key->passes.size();
 
 	Rect2i viewport_rect(viewport_offset, viewport_size);
-	draw_graph->add_draw_list_set_viewport(viewport_rect);
-	draw_graph->add_draw_list_set_scissor(viewport_rect);
+	draw_graph->add_draw_list_set_viewport(0, viewport_rect);
+	draw_graph->add_draw_list_set_scissor(0, viewport_rect);
 
 	return int64_t(ID_TYPE_DRAW_LIST) << ID_BASE_SHIFT;
 }
@@ -5818,16 +5818,18 @@ Error RenderingDevice::draw_list_begin_split(RID p_framebuffer, uint32_t p_split
 #endif
 
 void RenderingDevice::draw_list_set_blend_constants(DrawListID p_list, const Color &p_color) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
 
-	draw_graph->add_draw_list_set_blend_constants(p_color);
+	draw_graph->add_draw_list_set_blend_constants(recorder, p_color);
 }
 
 void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_render_pipeline) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -5844,7 +5846,7 @@ void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_re
 
 	draw_list.state.pipeline = p_render_pipeline;
 
-	draw_graph->add_draw_list_bind_pipeline(pipeline->driver_id, pipeline->stage_bits);
+	draw_graph->add_draw_list_bind_pipeline(recorder, pipeline->driver_id, pipeline->stage_bits);
 
 	if (draw_list.state.pipeline_shader != pipeline->shader) {
 		// Shader changed, so descriptor sets may become incompatible.
@@ -5915,7 +5917,8 @@ void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_re
 }
 
 void RenderingDevice::draw_list_bind_uniform_set(DrawListID p_list, RID p_uniform_set, uint32_t p_index) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 #ifdef DEBUG_ENABLED
@@ -5954,7 +5957,8 @@ void RenderingDevice::draw_list_bind_uniform_set(DrawListID p_list, RID p_unifor
 }
 
 void RenderingDevice::draw_list_bind_vertex_array(DrawListID p_list, RID p_vertex_array) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -5976,15 +5980,16 @@ void RenderingDevice::draw_list_bind_vertex_array(DrawListID p_list, RID p_verte
 #endif
 	draw_list.validation.vertex_array_size = vertex_array->vertex_count;
 
-	draw_graph->add_draw_list_bind_vertex_buffers(vertex_array->buffers, vertex_array->offsets);
+	draw_graph->add_draw_list_bind_vertex_buffers(recorder, vertex_array->buffers, vertex_array->offsets);
 
 	for (int i = 0; i < vertex_array->draw_trackers.size(); i++) {
-		draw_graph->add_draw_list_usage(vertex_array->draw_trackers[i], RDG::RESOURCE_USAGE_VERTEX_BUFFER_READ);
+		draw_graph->add_draw_list_usage(recorder, vertex_array->draw_trackers[i], RDG::RESOURCE_USAGE_VERTEX_BUFFER_READ);
 	}
 }
 
 void RenderingDevice::draw_list_bind_vertex_buffers_format(DrawListID p_list, VertexFormatID p_vertex_format, uint32_t p_vertex_count, const Span<RID> &p_vertex_buffers, const Span<uint64_t> &p_offsets) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6070,10 +6075,10 @@ void RenderingDevice::draw_list_bind_vertex_buffers_format(DrawListID p_list, Ve
 
 	draw_list.state.vertex_array = RID();
 
-	draw_graph->add_draw_list_bind_vertex_buffers(driver_buffers, offsets_span);
+	draw_graph->add_draw_list_bind_vertex_buffers(recorder, driver_buffers, offsets_span);
 
 	for (RDG::ResourceTracker *tracker : draw_trackers) {
-		draw_graph->add_draw_list_usage(tracker, RDG::RESOURCE_USAGE_VERTEX_BUFFER_READ);
+		draw_graph->add_draw_list_usage(recorder, tracker, RDG::RESOURCE_USAGE_VERTEX_BUFFER_READ);
 	}
 
 	draw_list.validation.vertex_array_size = p_vertex_count;
@@ -6085,7 +6090,8 @@ void RenderingDevice::draw_list_bind_vertex_buffers_format(DrawListID p_list, Ve
 }
 
 void RenderingDevice::draw_list_bind_index_array(DrawListID p_list, RID p_index_array) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6106,24 +6112,26 @@ void RenderingDevice::draw_list_bind_index_array(DrawListID p_list, RID p_index_
 	draw_list.validation.index_array_count = index_array->indices;
 
 	const uint64_t offset_bytes = index_array->offset * (index_array->format == INDEX_BUFFER_FORMAT_UINT16 ? sizeof(uint16_t) : sizeof(uint32_t));
-	draw_graph->add_draw_list_bind_index_buffer(index_array->driver_id, index_array->format, offset_bytes);
+	draw_graph->add_draw_list_bind_index_buffer(recorder, index_array->driver_id, index_array->format, offset_bytes);
 
 	if (index_array->draw_tracker != nullptr) {
-		draw_graph->add_draw_list_usage(index_array->draw_tracker, RDG::RESOURCE_USAGE_INDEX_BUFFER_READ);
+		draw_graph->add_draw_list_usage(recorder, index_array->draw_tracker, RDG::RESOURCE_USAGE_INDEX_BUFFER_READ);
 	}
 }
 
 void RenderingDevice::draw_list_set_line_width(DrawListID p_list, float p_width) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
 
-	draw_graph->add_draw_list_set_line_width(p_width);
+	draw_graph->add_draw_list_set_line_width(recorder, p_width);
 }
 
 void RenderingDevice::draw_list_set_push_constant(DrawListID p_list, const void *p_data, uint32_t p_data_size) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6133,7 +6141,7 @@ void RenderingDevice::draw_list_set_push_constant(DrawListID p_list, const void 
 			"This render pipeline requires (" + itos(draw_list.validation.pipeline_push_constant_size) + ") bytes of push constant data, supplied: (" + itos(p_data_size) + ")");
 #endif
 
-	draw_graph->add_draw_list_set_push_constant(draw_list.state.pipeline_shader_driver_id, p_data, p_data_size);
+	draw_graph->add_draw_list_set_push_constant(recorder, draw_list.state.pipeline_shader_driver_id, p_data, p_data_size);
 
 #ifdef DEBUG_ENABLED
 	draw_list.validation.pipeline_push_constant_supplied = true;
@@ -6141,7 +6149,8 @@ void RenderingDevice::draw_list_set_push_constant(DrawListID p_list, const void 
 }
 
 void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint32_t p_instances, uint32_t p_procedural_vertices) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6208,7 +6217,7 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 		}
 		// Prepare descriptor sets if the API doesn't use pipeline barriers.
 		if (!driver->api_trait_get(RDD::API_TRAIT_HONORS_PIPELINE_BARRIERS)) {
-			draw_graph->add_draw_list_uniform_set_prepare_for_use(draw_list.state.pipeline_shader_driver_id, draw_list.state.sets[i].uniform_set_driver_id, i);
+			draw_graph->add_draw_list_uniform_set_prepare_for_use(recorder, draw_list.state.pipeline_shader_driver_id, draw_list.state.sets[i].uniform_set_driver_id, i);
 		}
 	}
 
@@ -6224,7 +6233,7 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 				// All good, see if this requires re-binding.
 				if (i - last_set_index > 1) {
 					// If the descriptor sets are not contiguous, bind the previous ones and start a new batch.
-					draw_graph->add_draw_list_bind_uniform_sets(draw_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count);
+					draw_graph->add_draw_list_bind_uniform_sets(recorder, draw_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count);
 
 					first_set_index = i;
 					valid_set_count = 1;
@@ -6237,28 +6246,28 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 
 				UniformSet *uniform_set = uniform_set_owner.get_or_null(draw_list.state.sets[i].uniform_set);
 				ERR_FAIL_NULL(uniform_set);
-				if (RDG::draw_recorder_index == 0) {
+				if (recorder == 0) {
 					_uniform_set_update_shared(uniform_set);
 					_uniform_set_update_clears(uniform_set);
 				} else if (!uniform_set->shared_textures_to_update.is_empty() || !uniform_set->pending_clear_textures.is_empty()) {
 					// Both record graph commands; hand them to the serial side (draw_list_end()),
 					// which still runs before the draw list command is allocated.
-					draw_list_deferred_uniform_sets[RDG::draw_recorder_index].push_back(draw_list.state.sets[i].uniform_set);
+					draw_list_deferred_uniform_sets[recorder].push_back(draw_list.state.sets[i].uniform_set);
 				}
 
-				draw_graph->add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
+				draw_graph->add_draw_list_usages(recorder, uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 				draw_list.state.sets[i].bound = true;
 
 				last_set_index = i;
 			} else {
-				draw_graph->add_draw_list_bind_uniform_set(draw_list.state.pipeline_shader_driver_id, draw_list.state.sets[i].uniform_set_driver_id, i);
+				draw_graph->add_draw_list_bind_uniform_set(recorder, draw_list.state.pipeline_shader_driver_id, draw_list.state.sets[i].uniform_set_driver_id, i);
 			}
 		}
 	}
 
 	// Bind the remaining batch.
 	if (descriptor_set_batching && valid_set_count > 0) {
-		draw_graph->add_draw_list_bind_uniform_sets(draw_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count);
+		draw_graph->add_draw_list_bind_uniform_sets(recorder, draw_list.state.pipeline_shader_driver_id, valid_descriptor_ids, first_set_index, valid_set_count);
 	}
 
 	if (p_use_indices) {
@@ -6282,7 +6291,7 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 				"Index amount (" + itos(to_draw) + ") must be a multiple of the amount of indices required by the render primitive (" + itos(draw_list.validation.pipeline_primitive_divisor) + ").");
 #endif
 
-		draw_graph->add_draw_list_draw_indexed(to_draw, p_instances, 0);
+		draw_graph->add_draw_list_draw_indexed(recorder, to_draw, p_instances, 0);
 	} else {
 		uint32_t to_draw;
 
@@ -6304,14 +6313,15 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 				"Vertex amount (" + itos(to_draw) + ") must be a multiple of the amount of vertices required by the render primitive (" + itos(draw_list.validation.pipeline_primitive_divisor) + ").");
 #endif
 
-		draw_graph->add_draw_list_draw(to_draw, p_instances);
+		draw_graph->add_draw_list_draw(recorder, to_draw, p_instances);
 	}
 
 	draw_list.state.draw_count++;
 }
 
 void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indices, RID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6369,7 +6379,7 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 				continue;
 			}
 
-			draw_graph->add_draw_list_uniform_set_prepare_for_use(draw_list.state.pipeline_shader_driver_id, draw_list.state.sets[i].uniform_set_driver_id, i);
+			draw_graph->add_draw_list_uniform_set_prepare_for_use(recorder, draw_list.state.pipeline_shader_driver_id, draw_list.state.sets[i].uniform_set_driver_id, i);
 		}
 	}
 
@@ -6380,14 +6390,14 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 		}
 		if (!draw_list.state.sets[i].bound) {
 			// All good, see if this requires re-binding.
-			draw_graph->add_draw_list_bind_uniform_set(draw_list.state.pipeline_shader_driver_id, draw_list.state.sets[i].uniform_set_driver_id, i);
+			draw_graph->add_draw_list_bind_uniform_set(recorder, draw_list.state.pipeline_shader_driver_id, draw_list.state.sets[i].uniform_set_driver_id, i);
 
 			UniformSet *uniform_set = uniform_set_owner.get_or_null(draw_list.state.sets[i].uniform_set);
 			ERR_FAIL_NULL(uniform_set);
 			_uniform_set_update_shared(uniform_set);
 			_uniform_set_update_clears(uniform_set);
 
-			draw_graph->add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
+			draw_graph->add_draw_list_usages(recorder, uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
 
 			draw_list.state.sets[i].bound = true;
 		}
@@ -6404,24 +6414,25 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 
 		ERR_FAIL_COND_MSG(p_offset + 20 > buffer->size, "Offset provided (+20) is past the end of buffer.");
 
-		draw_graph->add_draw_list_draw_indexed_indirect(buffer->driver_id, p_offset, p_draw_count, p_stride);
+		draw_graph->add_draw_list_draw_indexed_indirect(recorder, buffer->driver_id, p_offset, p_draw_count, p_stride);
 	} else {
 		ERR_FAIL_COND_MSG(p_offset + 16 > buffer->size, "Offset provided (+16) is past the end of buffer.");
 
-		draw_graph->add_draw_list_draw_indirect(buffer->driver_id, p_offset, p_draw_count, p_stride);
+		draw_graph->add_draw_list_draw_indirect(recorder, buffer->driver_id, p_offset, p_draw_count, p_stride);
 	}
 
 	draw_list.state.draw_count++;
 
 	if (buffer->draw_tracker != nullptr) {
-		draw_graph->add_draw_list_usage(buffer->draw_tracker, RDG::RESOURCE_USAGE_INDIRECT_BUFFER_READ);
+		draw_graph->add_draw_list_usage(recorder, buffer->draw_tracker, RDG::RESOURCE_USAGE_INDIRECT_BUFFER_READ);
 	}
 
 	_check_transfer_worker_buffer(buffer);
 }
 
 void RenderingDevice::draw_list_set_viewport(DrawListID p_list, const Rect2i &p_rect) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_FAIL_COND(!draw_list.active);
 
 	if (p_rect.get_area() == 0) {
@@ -6429,11 +6440,12 @@ void RenderingDevice::draw_list_set_viewport(DrawListID p_list, const Rect2i &p_
 	}
 
 	draw_list.viewport = p_rect;
-	draw_graph->add_draw_list_set_viewport(p_rect);
+	draw_graph->add_draw_list_set_viewport(recorder, p_rect);
 }
 
 void RenderingDevice::draw_list_enable_scissor(DrawListID p_list, const Rect2 &p_rect) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6447,16 +6459,17 @@ void RenderingDevice::draw_list_enable_scissor(DrawListID p_list, const Rect2 &p
 		return;
 	}
 
-	draw_graph->add_draw_list_set_scissor(rect);
+	draw_graph->add_draw_list_set_scissor(recorder, rect);
 }
 
 void RenderingDevice::draw_list_disable_scissor(DrawListID p_list) {
-	DrawList &draw_list = draw_lists[RDG::draw_recorder_index];
+	const uint32_t recorder = draw_list_recorder_of(p_list);
+	DrawList &draw_list = draw_lists[recorder];
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
 
-	draw_graph->add_draw_list_set_scissor(draw_list.viewport);
+	draw_graph->add_draw_list_set_scissor(recorder, draw_list.viewport);
 }
 
 uint32_t RenderingDevice::draw_list_get_current_pass() {
@@ -6476,7 +6489,7 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_switch_to_next_pass() {
 	Rect2i viewport;
 	_draw_list_end(&viewport);
 
-	draw_graph->add_draw_list_next_subpass(RDD::COMMAND_BUFFER_TYPE_PRIMARY);
+	draw_graph->add_draw_list_next_subpass(0, RDD::COMMAND_BUFFER_TYPE_PRIMARY);
 
 	_draw_list_start(viewport);
 
@@ -6511,10 +6524,6 @@ void RenderingDevice::draw_list_set_recorder_count(uint32_t p_count) {
 	}
 	draw_list_recorder_count = p_count;
 	draw_graph->set_draw_recorder_count(p_count);
-}
-
-void RenderingDevice::draw_list_bind_recorder(uint32_t p_recorder) {
-	RDG::draw_recorder_index = p_recorder;
 }
 
 void RenderingDevice::_draw_list_process_deferred_uniform_sets() {

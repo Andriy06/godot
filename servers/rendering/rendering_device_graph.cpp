@@ -390,10 +390,8 @@ RenderingDeviceGraph::RecordedCommand *RenderingDeviceGraph::_allocate_command(u
 	return new_command;
 }
 
-thread_local uint32_t RenderingDeviceGraph::draw_recorder_index = 0;
-
-RenderingDeviceGraph::DrawListInstruction *RenderingDeviceGraph::_allocate_draw_list_instruction(uint32_t p_instruction_size) {
-	LocalVector<uint8_t> &draw_list_data = _draw_recorder_data();
+RenderingDeviceGraph::DrawListInstruction *RenderingDeviceGraph::_allocate_draw_list_instruction(uint32_t p_recorder, uint32_t p_instruction_size) {
+	LocalVector<uint8_t> &draw_list_data = _draw_recorder_data(p_recorder);
 	uint32_t draw_list_data_offset = draw_list_data.size();
 	draw_list_data_offset = GRAPH_ALIGN(draw_list_data_offset);
 	draw_list_data.resize(draw_list_data_offset + p_instruction_size);
@@ -2241,36 +2239,36 @@ void RenderingDeviceGraph::add_draw_list_begin(RDD::RenderPassID p_render_pass, 
 	_add_draw_list_begin(nullptr, p_render_pass, p_framebuffer, p_region, p_attachment_operations, p_attachment_clear_values, p_stages, p_breadcrumb, p_split_cmd_buffer);
 }
 
-void RenderingDeviceGraph::add_draw_list_bind_index_buffer(RDD::BufferID p_buffer, RDD::IndexBufferFormat p_format, uint32_t p_offset) {
-	DrawListBindIndexBufferInstruction *instruction = reinterpret_cast<DrawListBindIndexBufferInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListBindIndexBufferInstruction)));
+void RenderingDeviceGraph::add_draw_list_bind_index_buffer(uint32_t p_recorder, RDD::BufferID p_buffer, RDD::IndexBufferFormat p_format, uint32_t p_offset) {
+	DrawListBindIndexBufferInstruction *instruction = reinterpret_cast<DrawListBindIndexBufferInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListBindIndexBufferInstruction)));
 	instruction->type = DrawListInstruction::TYPE_BIND_INDEX_BUFFER;
 	instruction->buffer = p_buffer;
 	instruction->format = p_format;
 	instruction->offset = p_offset;
 
 	if (instruction->buffer.id != 0) {
-		_draw_recorder_stages().set_flag(RDD::PIPELINE_STAGE_VERTEX_INPUT_BIT);
+		_draw_recorder_stages(p_recorder).set_flag(RDD::PIPELINE_STAGE_VERTEX_INPUT_BIT);
 	}
 }
 
-void RenderingDeviceGraph::add_draw_list_bind_pipeline(RDD::PipelineID p_pipeline, BitField<RDD::PipelineStageBits> p_pipeline_stage_bits) {
-	DrawListBindPipelineInstruction *instruction = reinterpret_cast<DrawListBindPipelineInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListBindPipelineInstruction)));
+void RenderingDeviceGraph::add_draw_list_bind_pipeline(uint32_t p_recorder, RDD::PipelineID p_pipeline, BitField<RDD::PipelineStageBits> p_pipeline_stage_bits) {
+	DrawListBindPipelineInstruction *instruction = reinterpret_cast<DrawListBindPipelineInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListBindPipelineInstruction)));
 	instruction->type = DrawListInstruction::TYPE_BIND_PIPELINE;
 	instruction->pipeline = p_pipeline;
-	_draw_recorder_stages() = _draw_recorder_stages() | p_pipeline_stage_bits;
+	_draw_recorder_stages(p_recorder) = _draw_recorder_stages(p_recorder) | p_pipeline_stage_bits;
 
 	workarounds_state.bound_any_draw_list_pipeline = true;
 }
 
-void RenderingDeviceGraph::add_draw_list_bind_uniform_set(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index) {
-	add_draw_list_bind_uniform_sets(p_shader, VectorView(&p_uniform_set, 1), set_index, 1);
+void RenderingDeviceGraph::add_draw_list_bind_uniform_set(uint32_t p_recorder, RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index) {
+	add_draw_list_bind_uniform_sets(p_recorder, p_shader, VectorView(&p_uniform_set, 1), set_index, 1);
 }
 
-void RenderingDeviceGraph::add_draw_list_bind_uniform_sets(RDD::ShaderID p_shader, VectorView<RDD::UniformSetID> p_uniform_sets, uint32_t p_first_index, uint32_t p_set_count) {
+void RenderingDeviceGraph::add_draw_list_bind_uniform_sets(uint32_t p_recorder, RDD::ShaderID p_shader, VectorView<RDD::UniformSetID> p_uniform_sets, uint32_t p_first_index, uint32_t p_set_count) {
 	DEV_ASSERT(p_uniform_sets.size() >= p_set_count);
 
 	uint32_t instruction_size = sizeof(DrawListBindUniformSetsInstruction) + sizeof(RDD::UniformSetID) * p_set_count;
-	DrawListBindUniformSetsInstruction *instruction = reinterpret_cast<DrawListBindUniformSetsInstruction *>(_allocate_draw_list_instruction(instruction_size));
+	DrawListBindUniformSetsInstruction *instruction = reinterpret_cast<DrawListBindUniformSetsInstruction *>(_allocate_draw_list_instruction(p_recorder, instruction_size));
 	instruction->type = DrawListInstruction::TYPE_BIND_UNIFORM_SETS;
 	instruction->shader = p_shader;
 	instruction->first_set_index = p_first_index;
@@ -2282,11 +2280,11 @@ void RenderingDeviceGraph::add_draw_list_bind_uniform_sets(RDD::ShaderID p_shade
 	}
 }
 
-void RenderingDeviceGraph::add_draw_list_bind_vertex_buffers(Span<RDD::BufferID> p_vertex_buffers, Span<uint64_t> p_vertex_buffer_offsets) {
+void RenderingDeviceGraph::add_draw_list_bind_vertex_buffers(uint32_t p_recorder, Span<RDD::BufferID> p_vertex_buffers, Span<uint64_t> p_vertex_buffer_offsets) {
 	DEV_ASSERT(p_vertex_buffers.size() == p_vertex_buffer_offsets.size());
 
 	uint32_t instruction_size = sizeof(DrawListBindVertexBuffersInstruction) + sizeof(RDD::BufferID) * p_vertex_buffers.size() + sizeof(uint64_t) * p_vertex_buffer_offsets.size();
-	DrawListBindVertexBuffersInstruction *instruction = reinterpret_cast<DrawListBindVertexBuffersInstruction *>(_allocate_draw_list_instruction(instruction_size));
+	DrawListBindVertexBuffersInstruction *instruction = reinterpret_cast<DrawListBindVertexBuffersInstruction *>(_allocate_draw_list_instruction(p_recorder, instruction_size));
 	instruction->type = DrawListInstruction::TYPE_BIND_VERTEX_BUFFERS;
 	instruction->vertex_buffers_count = p_vertex_buffers.size();
 	instruction->dynamic_offsets_mask = driver->buffer_get_dynamic_offsets(p_vertex_buffers);
@@ -2299,13 +2297,13 @@ void RenderingDeviceGraph::add_draw_list_bind_vertex_buffers(Span<RDD::BufferID>
 	}
 
 	if (instruction->vertex_buffers_count > 0) {
-		_draw_recorder_stages().set_flag(RDD::PIPELINE_STAGE_VERTEX_INPUT_BIT);
+		_draw_recorder_stages(p_recorder).set_flag(RDD::PIPELINE_STAGE_VERTEX_INPUT_BIT);
 	}
 }
 
-void RenderingDeviceGraph::add_draw_list_clear_attachments(VectorView<RDD::AttachmentClear> p_attachments_clear, VectorView<Rect2i> p_attachments_clear_rect) {
+void RenderingDeviceGraph::add_draw_list_clear_attachments(uint32_t p_recorder, VectorView<RDD::AttachmentClear> p_attachments_clear, VectorView<Rect2i> p_attachments_clear_rect) {
 	uint32_t instruction_size = sizeof(DrawListClearAttachmentsInstruction) + sizeof(RDD::AttachmentClear) * p_attachments_clear.size() + sizeof(Rect2i) * p_attachments_clear_rect.size();
-	DrawListClearAttachmentsInstruction *instruction = reinterpret_cast<DrawListClearAttachmentsInstruction *>(_allocate_draw_list_instruction(instruction_size));
+	DrawListClearAttachmentsInstruction *instruction = reinterpret_cast<DrawListClearAttachmentsInstruction *>(_allocate_draw_list_instruction(p_recorder, instruction_size));
 	instruction->type = DrawListInstruction::TYPE_CLEAR_ATTACHMENTS;
 	instruction->attachments_clear_count = p_attachments_clear.size();
 	instruction->attachments_clear_rect_count = p_attachments_clear_rect.size();
@@ -2321,101 +2319,100 @@ void RenderingDeviceGraph::add_draw_list_clear_attachments(VectorView<RDD::Attac
 	}
 }
 
-void RenderingDeviceGraph::add_draw_list_draw(uint32_t p_vertex_count, uint32_t p_instance_count) {
-	DrawListDrawInstruction *instruction = reinterpret_cast<DrawListDrawInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListDrawInstruction)));
+void RenderingDeviceGraph::add_draw_list_draw(uint32_t p_recorder, uint32_t p_vertex_count, uint32_t p_instance_count) {
+	DrawListDrawInstruction *instruction = reinterpret_cast<DrawListDrawInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListDrawInstruction)));
 	instruction->type = DrawListInstruction::TYPE_DRAW;
 	instruction->vertex_count = p_vertex_count;
 	instruction->instance_count = p_instance_count;
 }
 
-void RenderingDeviceGraph::add_draw_list_draw_indexed(uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index) {
-	DrawListDrawIndexedInstruction *instruction = reinterpret_cast<DrawListDrawIndexedInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListDrawIndexedInstruction)));
+void RenderingDeviceGraph::add_draw_list_draw_indexed(uint32_t p_recorder, uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index) {
+	DrawListDrawIndexedInstruction *instruction = reinterpret_cast<DrawListDrawIndexedInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListDrawIndexedInstruction)));
 	instruction->type = DrawListInstruction::TYPE_DRAW_INDEXED;
 	instruction->index_count = p_index_count;
 	instruction->instance_count = p_instance_count;
 	instruction->first_index = p_first_index;
 }
 
-void RenderingDeviceGraph::add_draw_list_draw_indirect(RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
-	DrawListDrawIndirectInstruction *instruction = reinterpret_cast<DrawListDrawIndirectInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListDrawIndirectInstruction)));
+void RenderingDeviceGraph::add_draw_list_draw_indirect(uint32_t p_recorder, RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
+	DrawListDrawIndirectInstruction *instruction = reinterpret_cast<DrawListDrawIndirectInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListDrawIndirectInstruction)));
 	instruction->type = DrawListInstruction::TYPE_DRAW_INDIRECT;
 	instruction->buffer = p_buffer;
 	instruction->offset = p_offset;
 	instruction->draw_count = p_draw_count;
 	instruction->stride = p_stride;
-	_draw_recorder_stages().set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+	_draw_recorder_stages(p_recorder).set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
 }
 
-void RenderingDeviceGraph::add_draw_list_draw_indexed_indirect(RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
-	DrawListDrawIndexedIndirectInstruction *instruction = reinterpret_cast<DrawListDrawIndexedIndirectInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListDrawIndexedIndirectInstruction)));
+void RenderingDeviceGraph::add_draw_list_draw_indexed_indirect(uint32_t p_recorder, RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
+	DrawListDrawIndexedIndirectInstruction *instruction = reinterpret_cast<DrawListDrawIndexedIndirectInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListDrawIndexedIndirectInstruction)));
 	instruction->type = DrawListInstruction::TYPE_DRAW_INDEXED_INDIRECT;
 	instruction->buffer = p_buffer;
 	instruction->offset = p_offset;
 	instruction->draw_count = p_draw_count;
 	instruction->stride = p_stride;
-	_draw_recorder_stages().set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+	_draw_recorder_stages(p_recorder).set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
 }
 
-void RenderingDeviceGraph::add_draw_list_execute_commands(RDD::CommandBufferID p_command_buffer) {
-	DrawListExecuteCommandsInstruction *instruction = reinterpret_cast<DrawListExecuteCommandsInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListExecuteCommandsInstruction)));
+void RenderingDeviceGraph::add_draw_list_execute_commands(uint32_t p_recorder, RDD::CommandBufferID p_command_buffer) {
+	DrawListExecuteCommandsInstruction *instruction = reinterpret_cast<DrawListExecuteCommandsInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListExecuteCommandsInstruction)));
 	instruction->type = DrawListInstruction::TYPE_EXECUTE_COMMANDS;
 	instruction->command_buffer = p_command_buffer;
 }
 
-void RenderingDeviceGraph::add_draw_list_next_subpass(RDD::CommandBufferType p_command_buffer_type) {
-	DrawListNextSubpassInstruction *instruction = reinterpret_cast<DrawListNextSubpassInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListNextSubpassInstruction)));
+void RenderingDeviceGraph::add_draw_list_next_subpass(uint32_t p_recorder, RDD::CommandBufferType p_command_buffer_type) {
+	DrawListNextSubpassInstruction *instruction = reinterpret_cast<DrawListNextSubpassInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListNextSubpassInstruction)));
 	instruction->type = DrawListInstruction::TYPE_NEXT_SUBPASS;
 	instruction->command_buffer_type = p_command_buffer_type;
 }
 
-void RenderingDeviceGraph::add_draw_list_set_blend_constants(const Color &p_color) {
-	DrawListSetBlendConstantsInstruction *instruction = reinterpret_cast<DrawListSetBlendConstantsInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListSetBlendConstantsInstruction)));
+void RenderingDeviceGraph::add_draw_list_set_blend_constants(uint32_t p_recorder, const Color &p_color) {
+	DrawListSetBlendConstantsInstruction *instruction = reinterpret_cast<DrawListSetBlendConstantsInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListSetBlendConstantsInstruction)));
 	instruction->type = DrawListInstruction::TYPE_SET_BLEND_CONSTANTS;
 	instruction->color = p_color;
 }
 
-void RenderingDeviceGraph::add_draw_list_set_line_width(float p_width) {
-	DrawListSetLineWidthInstruction *instruction = reinterpret_cast<DrawListSetLineWidthInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListSetLineWidthInstruction)));
+void RenderingDeviceGraph::add_draw_list_set_line_width(uint32_t p_recorder, float p_width) {
+	DrawListSetLineWidthInstruction *instruction = reinterpret_cast<DrawListSetLineWidthInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListSetLineWidthInstruction)));
 	instruction->type = DrawListInstruction::TYPE_SET_LINE_WIDTH;
 	instruction->width = p_width;
 }
 
-void RenderingDeviceGraph::add_draw_list_set_push_constant(RDD::ShaderID p_shader, const void *p_data, uint32_t p_data_size) {
+void RenderingDeviceGraph::add_draw_list_set_push_constant(uint32_t p_recorder, RDD::ShaderID p_shader, const void *p_data, uint32_t p_data_size) {
 	uint32_t instruction_size = sizeof(DrawListSetPushConstantInstruction) + p_data_size;
-	DrawListSetPushConstantInstruction *instruction = reinterpret_cast<DrawListSetPushConstantInstruction *>(_allocate_draw_list_instruction(instruction_size));
+	DrawListSetPushConstantInstruction *instruction = reinterpret_cast<DrawListSetPushConstantInstruction *>(_allocate_draw_list_instruction(p_recorder, instruction_size));
 	instruction->type = DrawListInstruction::TYPE_SET_PUSH_CONSTANT;
 	instruction->size = p_data_size;
 	instruction->shader = p_shader;
 	memcpy(instruction->data(), p_data, p_data_size);
 }
 
-void RenderingDeviceGraph::add_draw_list_set_scissor(Rect2i p_rect) {
-	DrawListSetScissorInstruction *instruction = reinterpret_cast<DrawListSetScissorInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListSetScissorInstruction)));
+void RenderingDeviceGraph::add_draw_list_set_scissor(uint32_t p_recorder, Rect2i p_rect) {
+	DrawListSetScissorInstruction *instruction = reinterpret_cast<DrawListSetScissorInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListSetScissorInstruction)));
 	instruction->type = DrawListInstruction::TYPE_SET_SCISSOR;
 	instruction->rect = p_rect;
 }
 
-void RenderingDeviceGraph::add_draw_list_set_viewport(Rect2i p_rect) {
-	DrawListSetViewportInstruction *instruction = reinterpret_cast<DrawListSetViewportInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListSetViewportInstruction)));
+void RenderingDeviceGraph::add_draw_list_set_viewport(uint32_t p_recorder, Rect2i p_rect) {
+	DrawListSetViewportInstruction *instruction = reinterpret_cast<DrawListSetViewportInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListSetViewportInstruction)));
 	instruction->type = DrawListInstruction::TYPE_SET_VIEWPORT;
 	instruction->rect = p_rect;
 }
 
-void RenderingDeviceGraph::add_draw_list_uniform_set_prepare_for_use(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index) {
-	DrawListUniformSetPrepareForUseInstruction *instruction = reinterpret_cast<DrawListUniformSetPrepareForUseInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListUniformSetPrepareForUseInstruction)));
+void RenderingDeviceGraph::add_draw_list_uniform_set_prepare_for_use(uint32_t p_recorder, RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index) {
+	DrawListUniformSetPrepareForUseInstruction *instruction = reinterpret_cast<DrawListUniformSetPrepareForUseInstruction *>(_allocate_draw_list_instruction(p_recorder, sizeof(DrawListUniformSetPrepareForUseInstruction)));
 	instruction->type = DrawListInstruction::TYPE_UNIFORM_SET_PREPARE_FOR_USE;
 	instruction->shader = p_shader;
 	instruction->uniform_set = p_uniform_set;
 	instruction->set_index = set_index;
 }
 
-void RenderingDeviceGraph::add_draw_list_usage(ResourceTracker *p_tracker, ResourceUsage p_usage) {
-	const uint32_t recorder = draw_recorder_index;
-	if (recorder != 0) {
+void RenderingDeviceGraph::add_draw_list_usage(uint32_t p_recorder, ResourceTracker *p_tracker, ResourceUsage p_usage) {
+	if (p_recorder != 0) {
 		// A parallel recorder must not touch the tracker (reset_if_outdated writes it, and the
 		// draw_list_index deduplication is per graph): it records the pair, and add_draw_list_end()
 		// replays it through this same function on the serial side, which deduplicates there.
-		DrawRecorder &r = draw_recorders[recorder - 1];
+		DrawRecorder &r = draw_recorders[p_recorder - 1];
 		r.trackers.push_back(p_tracker);
 		r.usages.push_back(p_usage);
 		return;
@@ -2436,11 +2433,11 @@ void RenderingDeviceGraph::add_draw_list_usage(ResourceTracker *p_tracker, Resou
 #endif
 }
 
-void RenderingDeviceGraph::add_draw_list_usages(VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages) {
+void RenderingDeviceGraph::add_draw_list_usages(uint32_t p_recorder, VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages) {
 	DEV_ASSERT(p_trackers.size() == p_usages.size());
 
 	for (uint32_t i = 0; i < p_trackers.size(); i++) {
-		add_draw_list_usage(p_trackers[i], p_usages[i]);
+		add_draw_list_usage(p_recorder, p_trackers[i], p_usages[i]);
 	}
 }
 
@@ -2456,7 +2453,6 @@ void RenderingDeviceGraph::add_draw_list_end() {
 	// Concatenate what the parallel recorders appended, in recorder order, so the instruction
 	// stream is exactly the one a single recorder would have produced for the same element ranges.
 	if (draw_recorder_count > 1) {
-		DEV_ASSERT(draw_recorder_index == 0);
 		for (uint32_t i = 1; i < draw_recorder_count; i++) {
 			DrawRecorder &r = draw_recorders[i - 1];
 			const uint32_t instruction_size = r.data.size();
@@ -2470,7 +2466,7 @@ void RenderingDeviceGraph::add_draw_list_end() {
 			}
 			draw_instruction_list.stages = draw_instruction_list.stages | r.stages;
 			for (uint32_t j = 0; j < r.trackers.size(); j++) {
-				add_draw_list_usage(r.trackers[j], r.usages[j]);
+				add_draw_list_usage(0, r.trackers[j], r.usages[j]);
 			}
 			r.clear();
 		}

@@ -479,7 +479,26 @@ private:
 	template <PassMode p_pass_mode, uint32_t p_color_pass_flags = 0>
 	_FORCE_INLINE_ void _render_list_template(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element);
 	void _render_list(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element);
-	static uint32_t _draw_list_recorders_for(uint32_t p_element_count);
+	uint32_t _draw_list_recorders_for(uint32_t p_element_count) const;
+
+	// A pipeline lookup that missed while a parallel recorder was running. The pipeline map is
+	// read-only for the duration of the chunks, so the chunk records what it wanted here and skips
+	// the element for this frame; _resolve_pipeline_misses() runs the ordinary get_pipeline() for
+	// each one after the chunks join, which is the serial miss path, and the next frame hits.
+	struct PipelineMiss {
+		SceneShaderForwardClustered::ShaderData *shader = nullptr;
+		SceneShaderForwardClustered::ShaderData::PipelineKey key;
+		uint32_t key_hash = 0;
+		RSE::PipelineSource source = RSE::PIPELINE_SOURCE_DRAW;
+		bool wait_for_compilation = false;
+	};
+	// Indexed by recorder; only the chunk that owns a recorder writes its list.
+	LocalVector<PipelineMiss> draw_pipeline_misses[RDG::MAX_DRAW_RECORDERS];
+	// Frame number of the last miss. Recording stays serial through the frame after it, so a cold
+	// frame is never drawn with the holes a skipped element would leave.
+	uint64_t draw_pipeline_miss_frame = 0;
+	uint32_t _resolve_pipeline_misses(uint32_t p_recorder_count);
+
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
 
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);
