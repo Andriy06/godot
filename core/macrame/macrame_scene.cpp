@@ -145,9 +145,9 @@ void _write_phase_trace(PhaseGraph &pg);
 void _write_frame_trace(FrameGraph &fg);
 namespace {
 // Graph_trace freezes its utilization bucket width from the makespan mean of the first bucketed
-// run. The benchmark's first runs execute an empty scene (~0.2 ms), so the wash would cover a
-// sliver of a real 7 ms run. Reset the aggregates once the scene is populated; the SVG is
-// written 3000 runs after that. MACRAME_TRACE_WARMUP=<runs> (default 300).
+// run. The benchmark's first runs execute an empty scene (~0.2 ms), so a trace attached at
+// compile time would bucket a 7 ms run into a 0.2 ms wash. The trace is attached only once the
+// scene is populated, at run MACRAME_TRACE_WARMUP (default 300); the SVG is written 3000 runs later.
 uint64_t trace_warmup_runs() {
 	static const uint64_t n = [] {
 		const String v = OS::get_singleton()->get_environment("MACRAME_TRACE_WARMUP");
@@ -317,7 +317,7 @@ void _build_phase_graph(PhaseGraph &pg, bool p_physics, ts::Guarded<PhysicsGrant
 	const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
 	const String dot = dir.is_empty() ? String() : dir + (p_physics ? "/macrame_physics_phase.dot" : "/macrame_process_phase.dot");
 	pg.graph.compile(dot.is_empty() ? nullptr : dot.utf8().get_data());
-	pg.graph.set_trace(&pg.trace);
+	// The trace is attached at run trace_warmup_runs() (see above), not here.
 	pg.built = true;
 	print_verbose(vformat("Macrame: %s phase compiled as a static graph (%d nodes).", p_physics ? "physics" : "process", pg.graph.node_count()));
 }
@@ -360,7 +360,7 @@ void MacrameScene::run_groups(SceneTree *p_tree, void **p_groups, int p_group_co
 		pg.graph.execute().sync(); // One run at a time; the phases are sequential on the main thread.
 		++pg.runs;
 		if (pg.runs == trace_warmup_runs()) {
-			pg.trace.reset(); // Bucket width re-derived from populated runs.
+			pg.graph.set_trace(&pg.trace); // From here on: populated runs only.
 		}
 		if (pg.runs == trace_warmup_runs() + 3000 && !pg.written) {
 			// The average run so far, written mid-run (the benchmark harness kills the process; the
@@ -476,7 +476,7 @@ void _build_frame_graph(FrameGraph &fg, ts::Guarded<PhysicsGrantToken> *p_space)
 	const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
 	const String dot = dir.is_empty() ? String() : dir + "/" + String(fg.dot_name);
 	fg.graph.compile(dot.is_empty() ? nullptr : dot.utf8().get_data());
-	fg.graph.set_trace(&fg.trace);
+	// The trace is attached at run trace_warmup_runs() (see above), not here.
 	fg.built = true;
 	print_verbose(vformat("Macrame: %s compiled as a static graph (%d nodes).", fg.svg_name, fg.graph.node_count()));
 }
@@ -500,7 +500,7 @@ void _frame_run(FrameGraph &fg, SceneTree *p_tree) {
 	}
 	++fg.runs;
 	if (fg.runs == trace_warmup_runs()) {
-		fg.trace.reset(); // Bucket width re-derived from populated runs.
+		fg.graph.set_trace(&fg.trace); // From here on: populated runs only.
 	}
 	if (fg.runs == trace_warmup_runs() + 3000 && !fg.written) {
 		// The average run so far, written mid-run (the benchmark harness kills the process; the
