@@ -31,6 +31,12 @@
 #include "rendering_server_default.h"
 
 #include "core/macrame/macrame_runtime.h"
+#include "core/macrame/macrame_scene.h"
+
+#ifdef MACRAME_ENABLED
+#include "ts/priority.h"
+#include "ts/static_task_graph.h"
+#endif
 
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
@@ -76,32 +82,99 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 }
 
 #ifdef MACRAME_ENABLED
-std::atomic<int> RenderingServerDefault::submits_in_flight{ 0 };
+// --- The two frame-graph nodes -----------------------------------------------------------
+//
+// `render` writes the render server's guarded object, `submit` writes the device's, and neither
+// declares anything else, so `compile()` derives no edge between them or to the shard, step and
+// navigation nodes. That is the point: the three chains of a run work on different frames.
 
-void RenderingServerDefault::_join_submit_slot(int p_slot) {
-	if (submit_valid[p_slot]) {
-		GodotProfileZone("MacrameCommandQueue: wait for oldest submit");
-		submit_tasks[p_slot].sync();
-		submit_valid[p_slot] = false;
+// The render node. Declared access: write on `MacrameCommandQueue::get_guarded()` (the render
+// server). It applies the command journal cut at the last frame boundary - everything the shards
+// and the blue thread staged during the previous run - records that frame's draw, and leaves the
+// recorded frame in the hand-off ring for the next run's submit node.
+void RenderingServerDefault::_macrame_render_node() {
+	if (!render_request) {
+		// Start-up only: the first run of each graph happens before `draw()` has posted anything
+		// (the graph runs in the middle of the iteration, the post is at its end), and an
+		// iteration that draws nothing posts nothing. Never a "the node has no work" no-op in
+		// steady state.
+		return;
+	}
+	render_request = false;
+	const int slot = split_draw ? render_slot : -1;
+	MacrameRender::set_holds_grant(true);
+	MacrameRuntime::long_task_begin();
+	command_queue.commit_previous_under_grant();
+	_draw(render_present, render_step, slot);
+	MacrameRuntime::long_task_end();
+	MacrameRender::set_holds_grant(false);
+	// Read by the blue thread at the next frame boundary, which is the only other reader.
+	last_render_slot = slot;
+}
+
+// The submit node. Declared access: write on `Guarded<RenderingDeviceSubmit>` (the device
+// payload). It does one thing: take the value the previous run's render node staged and submit it
+// - compile the graph, hand it to the queue, present.
+void RenderingServerDefault::_macrame_submit_node() {
+	if (submit_slot < 0 || !handoff_ring[submit_slot].valid) {
+		return; // The first two runs, before a frame has travelled the ring.
+	}
+	Handoff &h = handoff_ring[submit_slot];
+	h.valid = false;
+	MacrameRenderDevice::set_holds_grant(true);
+	MacrameRuntime::long_task_begin();
+	RSG::rasterizer->submit_staged(h.staged, h.present);
+	MacrameRuntime::long_task_end();
+	MacrameRenderDevice::set_holds_grant(false);
+}
+
+void RenderingServerDefault::_macrame_add_frame_nodes(void *p_graph) {
+	ts::Static_task_graph &graph = *static_cast<ts::Static_task_graph *>(p_graph);
+	RenderingServerDefault *rs = static_cast<RenderingServerDefault *>(RenderingServer::get_singleton());
+	// High priority on both: they are the frame's two longest single-threaded bodies, and at
+	// equal priority a worker would pop a shard node ahead of them.
+	graph.add_node("render", [rs](RenderGrantToken &) { rs->_macrame_render_node(); },
+					rs->command_queue.get_guarded())
+			.set_priority(ts::Priority::high);
+	if (rs->split_draw) {
+		graph.add_node("submit", [rs](RenderingDeviceSubmit &) { rs->_macrame_submit_node(); },
+						*rs->device_guarded)
+				.set_priority(ts::Priority::high);
 	}
 }
 
-void RenderingServerDefault::_join_all_submits() {
-	for (int i = 0; i < SUBMIT_SLOTS; i++) {
-		_join_submit_slot(i);
+// Shutdown: the last run's render node staged a frame no submit node will consume, and `draw()`
+// may have posted one more that no render node will record. The staged one still owns a device
+// graph and a command buffer, so submit it here under the grant, as an ordinary access.
+void RenderingServerDefault::_macrame_drain_handoff() {
+	if (!split_draw) {
+		return;
+	}
+	for (int i = 0; i < HANDOFF_SLOTS; i++) {
+		// At most one slot is ever valid here, so the order does not matter; the loop is so that
+		// no frame is left behind whichever way the main loop exited.
+		Handoff &h = handoff_ring[i];
+		if (!h.valid) {
+			continue;
+		}
+		h.valid = false;
+		device_guarded->access([&](RenderingDeviceSubmit &) {
+					MacrameRenderDevice::set_holds_grant(true);
+					RSG::rasterizer->submit_staged(h.staged, h.present);
+					MacrameRenderDevice::set_holds_grant(false);
+				})
+				.sync();
 	}
 }
 
-void RenderingServerDefault::_join_submits_static() {
-	static_cast<RenderingServerDefault *>(RenderingServer::get_singleton())->_join_all_submits();
-}
-
-bool RenderingServerDefault::_submits_busy_static() {
-	return submits_in_flight.load(std::memory_order_acquire) != 0;
+void RenderingServerDefault::macrame_drain_commands() {
+	_macrame_drain_handoff();
+	command_queue.wait();
+	command_queue.sync();
 }
 #endif
 
-void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, int p_submit_slot) {
+void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, int p_handoff_slot) {
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
 
@@ -141,29 +214,15 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, int p
 
 	GodotProfileZoneGrouped(_profile_zone, "rasterizer->end_frame");
 #ifdef MACRAME_ENABLED
-	if (p_submit_slot >= 0) {
-		// Close the recorded frame and hand it to the device task. Everything the device task
-		// touches (that frame slot, that graph, the queue) is disjoint from what the next render
-		// task will touch, so the two run at the same time.
-		const uint64_t staged = RSG::rasterizer->stage_submit();
-		if (split_inline) {
-			// Diagnostic (MACRAME_SPLIT_INLINE=1): the same staged hand-off, submitted on this task
-			// instead of the device task, so a fault can be attributed to the split of the state or
-			// to the concurrency.
-			RSG::rasterizer->submit_staged(staged, p_swap_buffers);
-		} else {
-			submits_in_flight.fetch_add(1, std::memory_order_relaxed);
-			submit_tasks[p_submit_slot] = device_guarded->async([staged, p_swap_buffers](RenderingDeviceSubmit &) {
-				MacrameRenderDevice::set_holds_grant(true);
-				MacrameRuntime::long_task_begin();
-				RSG::rasterizer->submit_staged(staged, p_swap_buffers);
-				MacrameRuntime::long_task_end();
-				MacrameRenderDevice::set_holds_grant(false);
-				submits_in_flight.fetch_sub(1, std::memory_order_release);
-			},
-					{ .priority = ts::Priority::high, .name = "render-submit" });
-			submit_valid[p_submit_slot] = true;
-		}
+	if (p_handoff_slot >= 0) {
+		// Close the recorded frame into the hand-off value the next run's submit node consumes.
+		// Everything that value names (that frame slot, that graph, the queue) is disjoint from
+		// what this node touches from here on, and the ring slot belongs to this run's frame
+		// number, so no other node can be looking at it.
+		Handoff &h = handoff_ring[p_handoff_slot];
+		h.staged = RSG::rasterizer->stage_submit();
+		h.present = p_swap_buffers;
+		h.valid = true;
 	} else {
 		RSG::rasterizer->end_frame(p_swap_buffers);
 	}
@@ -332,11 +391,11 @@ void RenderingServerDefault::_init() {
 	RSG::canvas_render = RSG::rasterizer->get_canvas();
 	sr->set_scene_render(RSG::rasterizer->get_scene());
 #ifdef MACRAME_ENABLED
-	// MACRAME_SPLIT_DRAW=0 runs the draw as one task again (the frame's submit inline), for A/B.
+	// MACRAME_SPLIT_DRAW=0 makes `render` submit inline and adds no `submit` node, for A/B; a
+	// compositor without a device object (the GL one) has no submit node either way.
 	device_guarded = RSG::rasterizer->get_device_guarded();
 	split_draw = device_guarded != nullptr && RSG::rasterizer->supports_split_submit() && OS::get_singleton()->get_environment("MACRAME_SPLIT_DRAW") != "0";
-	split_inline = OS::get_singleton()->get_environment("MACRAME_SPLIT_INLINE") == "1";
-	print_verbose(split_draw ? "Macrame: split draw enabled (record task + device submit task)" : "Macrame: split draw disabled");
+	print_verbose(split_draw ? "Macrame: split draw enabled (render node + submit node)" : "Macrame: split draw disabled");
 #endif
 }
 
@@ -530,11 +589,15 @@ void RenderingServerDefault::set_physics_interpolation_enabled(bool p_enabled) {
 
 void RenderingServerDefault::sync() {
 #ifdef MACRAME_ENABLED
-	// The frame loop calls this at the top of every iteration. Joining the in-flight draw here
-	// would serialize simulation behind rendering (the separate-thread mode does exactly that);
-	// instead the next draw() joins it, applies the staged batch under the grant and launches.
-	// Synchronous getters and direct calls still join through flush_if_pending(). Shutdown
-	// (finish) waits explicitly.
+	// A no-op in frame-graph mode. The frame loop calls this once an iteration; applying the
+	// staged batch here would move a whole frame of renderer commands onto the blue thread, which
+	// is precisely the work the `render` node exists to hold. The batch is cut at the frame
+	// boundary below and applied by the next run's render node under its grant; synchronous
+	// getters and direct calls still flush through `flush_if_pending()`, and shutdown drains
+	// explicitly (`macrame_drain_commands`).
+	if (MacrameScene::frame_graph_running()) {
+		return;
+	}
 	if (command_queue.is_in_flight()) {
 		return;
 	}
@@ -554,48 +617,45 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	RS::get_singleton()->emit_signal(SNAME("frame_pre_draw"));
 	changes = 0;
 #ifdef MACRAME_ENABLED
-	// The draw runs as an asynchronous write task on the renderer and overlaps the next
-	// frame's simulation; the next sync() joins it. sync() has already applied the batch.
-	// Pipelined: this frame's batch and its draw queue behind the draw still running, and the
-	// main thread goes on to the next frame; it waits only when it is a whole frame ahead.
-	MacrameRenderSnapshot::publish(); // Outputs of the draws that completed become the version the next frame reads.
-	int submit_slot = -1;
-	if (split_draw) {
-		// Leave one render body outstanding, so the body two launches back has finished and the
-		// device task it launched exists; then join that device task, because the frame slot it
-		// owns is the one the body launched below will record into.
-		command_queue.wait_oldest();
-		// The body launched below touches two frame slots, not one. It records into the slot the
-		// device task `ring` renders back owned - and then `macrame_stage_submit` hands that slot
-		// over and immediately *opens the next one*, which is the slot the device task `ring - 1`
-		// renders back owned. The later of the two is the one that has to have finished: reopening
-		// a graph while its device task is still replaying it clears `command_data` under the
-		// replay, and `RenderingDeviceGraph::_check_reopen` catches it as
-		//
-		//   FATAL: access violation: class RenderingDeviceSubmit accessed for read_write without
-		//   declared access
-		//
-		// Joining only `ring` back left exactly that race: the device task one render newer was
-		// never joined, so a frame whose replay ran long (a GPU stall, a scheduling hiccup) was
-		// still holding the graph the render task went on to reopen. It fired about once in six
-		// benchmark runs; a temporary 4 ms delay at the head of the device task made it fire
-		// within a second of the benchmark starting, on every run, and none with this join.
-		//
-		// Device tasks are FIFO on the object, so joining `ring - 1` back settles `ring` back too;
-		// the second join below is only for the handle this frame is about to overwrite.
-		const uint64_t ring = RSG::rasterizer->split_frame_ring();
-		submit_slot = int(draw_seq & (SUBMIT_SLOTS - 1));
-		_join_submit_slot(int((draw_seq - (ring - 1)) & (SUBMIT_SLOTS - 1)));
-		_join_submit_slot(submit_slot); // The handle this frame is about to overwrite.
+	if (MacrameScene::frame_graph_running()) {
+		// The frame boundary, on the blue thread, with nothing in flight: the graph run of this
+		// iteration has been joined and the next one has not started. This is all `draw()` does in
+		// frame-graph mode - no launch, no join. The frame it posts is drawn by the `render` node
+		// of the next run and submitted by the `submit` node of the run after that.
+		GodotProfileZone("Macrame: frame boundary");
+
+		// 1. The outputs the render node staged during the run that just ended become the version
+		//    the next run's shards read.
+		MacrameRenderSnapshot::publish();
+
+		// 2. What that render node staged for the device is what the next run's submit node
+		//    drains. `last_render_slot` is written by the render node and read only here.
+		submit_slot = last_render_slot;
+		last_render_slot = -1;
+
+		// 3. Cut the command journal: everything staged up to this point - by this run's shards
+		//    and by the blue thread since the last cut - becomes the batch the next run's render
+		//    node applies under the grant. New commands stage into the other journal.
+		command_queue.cut_journal();
+
+		// 4. Post the frame. `draw_seq` is the frame number the ring's ownership is keyed on.
+		render_present = p_present;
+		render_step = frame_step;
+		render_slot = int(draw_seq % HANDOFF_SLOTS);
 		draw_seq++;
+		render_request = true;
+		return;
 	}
-	command_queue.launch_pipelined([this, p_present, frame_step, submit_slot](RenderGrantToken &) {
-		MacrameRender::set_holds_grant(true);
-		MacrameRuntime::long_task_begin();
-		_draw(p_present, frame_step, submit_slot);
-		MacrameRuntime::long_task_end();
-		MacrameRender::set_holds_grant(false);
-	}, "render", ts::Priority::high);
+	// No graph is running this iteration (start-up, before the scene tree exists): draw
+	// synchronously on this thread, under the grant, with the batch applied first.
+	MacrameRenderSnapshot::publish();
+	command_queue.sync();
+	command_queue.get_guarded().access([&](RenderGrantToken &) {
+							 MacrameRender::set_holds_grant(true);
+							 _draw(p_present, frame_step, -1);
+							 MacrameRender::set_holds_grant(false);
+						 })
+			.sync();
 	return;
 #endif
 	if (create_thread) {
@@ -629,9 +689,9 @@ RenderingServerDefault::RenderingServerDefault(bool p_create_thread) {
 	MacrameRender::set_access_query([]() {
 		return static_cast<RenderingServerDefault *>(RenderingServer::get_singleton())->command_queue.may_call_direct();
 	});
-	// The device tasks the draw launches are not on the render queue's object; teach it to join
-	// them and to report them busy, so a blue thread never takes the direct path mid-submit.
-	command_queue.set_downstream(&RenderingServerDefault::_join_submits_static, &RenderingServerDefault::_submits_busy_static);
+	// The renderer's two frame-graph nodes; `MacrameScene` calls this back when it compiles a
+	// graph that has a frame phase.
+	MacrameScene::set_frame_render_nodes(&RenderingServerDefault::_macrame_add_frame_nodes);
 #endif
 }
 
@@ -645,5 +705,6 @@ RenderingServerDefault::~RenderingServerDefault() {
 	// tail of the shutdown is.
 	MacrameRender::set_access_query(nullptr);
 	MacrameRender::set_token(nullptr);
+	MacrameScene::set_frame_render_nodes(nullptr);
 #endif
 }

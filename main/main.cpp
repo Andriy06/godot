@@ -4952,7 +4952,12 @@ bool Main::iteration() {
 	// An iteration carrying N physics ticks runs the `tick_only` graph (tick shards, the step,
 	// navigation) for each of the first N-1 ticks, then the `tick_frame` graph (those nodes plus
 	// the process shards) after the process phase; an iteration with no tick runs `plain_frame`.
+	// The frame's `render` and `submit` are two more nodes of `tick_frame` / `plain_frame`, so the
+	// renderer needs this decision too: `RenderingServer::draw()` posts the frame for the next
+	// run's render node when a graph is running, and draws synchronously on this thread when none
+	// is (every draw before the first iteration, and any iteration with no scene tree).
 	const bool macrame_graph = MacrameScene::frame_graph_enabled() && SceneTree::get_singleton() != nullptr;
+	MacrameScene::frame_set_graph_running(macrame_graph);
 	bool macrame_tick_captured = false; // The last tick's shard batches are waiting for `tick_frame`.
 #endif
 
@@ -5299,10 +5304,14 @@ void Main::cleanup(bool p_force) {
 
 	OS::get_singleton()->delete_main_loop();
 
-	// No main loop, no more frames: retire the pipelined machinery here, while every object it
-	// refers to is still alive. The compiled frame graphs name guarded objects owned by the
-	// physics server and the renderer, and the renderer's staged commands call into the servers
-	// and their modules; both of those are destroyed below.
+	// No main loop, no more frames: retire the compiled graphs here, while every object they refer
+	// to is still alive. They name guarded objects owned by the physics server and the renderer,
+	// and the renderer's staged commands call into the servers and their modules; both of those
+	// are destroyed below. From here any draw is synchronous again - there is no graph to run its
+	// `render` node.
+#ifdef MACRAME_ENABLED
+	MacrameScene::frame_set_graph_running(false);
+#endif
 	MacrameRuntime::finish_graphs();
 #ifdef MACRAME_ENABLED
 	if (rendering_server) {

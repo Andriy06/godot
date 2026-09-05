@@ -139,6 +139,8 @@ struct State {
 	std::atomic<int> next_shard{ 0 };
 };
 State *state = nullptr;
+MacrameScene::FrameNodeAdder render_node_adder = nullptr;
+bool graph_running = false;
 void _write_phase_trace(PhaseGraph &pg);
 void _write_frame_trace(FrameGraph &fg);
 
@@ -444,6 +446,15 @@ void _build_frame_graph(FrameGraph &fg, ts::Guarded<PhysicsGrantToken> *p_space)
 			}
 		}
 	}
+	if (fg.with_frame && render_node_adder) {
+		// `render` and `submit`. They declare the render server's and the device's guarded
+		// objects, which no other node names, so `compile()` derives no edge to anything here and
+		// none is wanted: the three chains of a run consume different frames' values. The render
+		// node applies the command journal cut at the last frame boundary and draws the frame the
+		// blue thread posted then; the submit node submits what the *previous* run's render node
+		// staged. See `RenderingServerDefault::_macrame_add_frame_nodes`.
+		render_node_adder(&fg.graph);
+	}
 	const String dir = OS::get_singleton()->get_environment("MACRAME_TRACE_DIR");
 	const String dot = dir.is_empty() ? String() : dir + "/" + String(fg.dot_name);
 	fg.graph.compile(dot.is_empty() ? nullptr : dot.utf8().get_data());
@@ -489,6 +500,18 @@ void MacrameScene::frame_set_capturing(bool p_capturing) {
 	state->frame.capturing = p_capturing;
 }
 
+void MacrameScene::set_frame_render_nodes(FrameNodeAdder p_adder) {
+	render_node_adder = p_adder;
+}
+
+bool MacrameScene::frame_graph_running() {
+	return graph_running;
+}
+
+void MacrameScene::frame_set_graph_running(bool p_running) {
+	graph_running = p_running;
+}
+
 void MacrameScene::frame_set_tick(double p_step) {
 	ERR_FAIL_NULL(state);
 	state->frame.tick_step = p_step;
@@ -528,6 +551,9 @@ void MacrameScene::check_read(const Node *) {}
 void MacrameScene::check_main(const Node *) {}
 void MacrameScene::run_groups(SceneTree *, void **, int, bool) {}
 bool MacrameScene::frame_graph_enabled() { return false; }
+void MacrameScene::set_frame_render_nodes(FrameNodeAdder) {}
+bool MacrameScene::frame_graph_running() { return false; }
+void MacrameScene::frame_set_graph_running(bool) {}
 void MacrameScene::frame_set_capturing(bool) {}
 void MacrameScene::frame_set_tick(double) {}
 void MacrameScene::frame_execute_tick(SceneTree *) {}

@@ -85,30 +85,62 @@ class RenderingServerDefault : public RenderingServer {
 
 #ifdef MACRAME_ENABLED
 	// Phase 1: staged commands into one guarded renderer; the draw is an async write task.
-	mutable MacrameCommandQueue<RenderGrantToken> command_queue{ "renderer", &MacrameRender::holds_grant };
+	mutable MacrameCommandQueue<RenderGrantToken> command_queue{ "renderer", &MacrameRender::holds_grant, /*stage_under_graph*/ true };
 
-	// The split draw. The renderer's guarded object covers the recording side (scene update,
-	// culling, render lists, the commands recorded into one of the device's graphs); the device
-	// side is a second guarded object whose payload is `RenderingDeviceSubmit` - the submission
-	// state itself, not a token - and which the device owns, so its methods can check the grant
-	// for themselves. The render task hands the recorded frame over as one value and launches the
-	// device task on that object, so frame N's submit overlaps frame N+1's recording. Ordering:
-	// the device tasks are FIFO on the object, each is launched by the render task that recorded
-	// its frame, and the main thread joins the device task whose frame slot the next render task
-	// is about to reuse.
+	// The split draw, as two nodes of the frame graph. The renderer's guarded object covers the
+	// recording side (scene update, culling, render lists, the commands recorded into one of the
+	// device's graphs); the device side is a second guarded object whose payload is
+	// `RenderingDeviceSubmit` - the submission state itself, not a token - and which the device
+	// owns, so its methods can check the grant for themselves.
+	//
+	// Neither node has an edge to anything, the way the Macrame sample's render pipeline has none
+	// to the simulation that produces the transforms it reads: they consume values produced by
+	// *earlier* runs. Run r looks like
+	//
+	//   render  applies the command journal cut at the last frame boundary, records the draw the
+	//           blue thread posted then, and stages it into `render_slot`
+	//   submit  submits `submit_slot` - what run r-1's render node staged
+	//
+	// so the simulation is one frame ahead of the recording and two ahead of the submission, as it
+	// was when these were dynamic tasks. What the node shape adds is that the run boundary orders
+	// them: a device frame slot is reopened for recording only after the submit node that owned it
+	// has finished, which the pipelined version could not guarantee (see results 2.15).
 	ts::Guarded<RenderingDeviceSubmit> *device_guarded = nullptr;
-	static constexpr int SUBMIT_SLOTS = 4;
-	ts::Task<void> submit_tasks[SUBMIT_SLOTS];
-	bool submit_valid[SUBMIT_SLOTS] = {};
-	uint64_t draw_seq = 0;
-	bool split_draw = false;
-	bool split_inline = false; // Diagnostic: stage the frame but submit it on the render task.
-	static std::atomic<int> submits_in_flight;
 
-	void _join_submit_slot(int p_slot);
-	void _join_all_submits();
-	static void _join_submits_static();
-	static bool _submits_busy_static();
+	// The hand-off ring: the value the render node produces and the submit node consumes. Three
+	// slots, like the device's own frame ring, so the slot being filled, the slot being drained
+	// and the slot next in line are always distinct.
+	//
+	// Ownership is by frame number and nothing else: slot i belongs to the render node during the
+	// run whose frame number is i mod HANDOFF_SLOTS, to the submit node during the next run, and
+	// to nobody afterwards. The two nodes run concurrently and touch different slots by
+	// construction; the value crosses a run boundary, where the blue thread's join of the graph is
+	// the ordering. Neither node computes its own index - the blue thread sets `render_slot` and
+	// `submit_slot` at the frame boundary - so neither reads a counter the other writes.
+	static constexpr int HANDOFF_SLOTS = 3;
+	struct Handoff {
+		uint64_t staged = 0; // The device's opaque handle for the recorded frame.
+		bool present = false;
+		bool valid = false;
+	};
+	Handoff handoff_ring[HANDOFF_SLOTS];
+
+	// Set by the blue thread in `draw()`, read by the next run's nodes.
+	bool render_request = false; // A frame has been posted and not yet recorded.
+	bool render_present = false;
+	double render_step = 0.0;
+	int render_slot = 0; // The ring slot the render node fills this run.
+	int submit_slot = -1; // The ring slot the submit node drains this run; -1 = nothing yet.
+	int last_render_slot = -1; // Written by the render node, read by the blue thread at the next boundary.
+	uint64_t draw_seq = 0;
+	bool split_draw = false; // The compositor has a device object, so `submit` is a node of its own.
+
+	void _macrame_render_node();
+	void _macrame_submit_node();
+	// Registered with `MacrameScene::set_frame_render_nodes`; adds the two nodes to a graph.
+	static void _macrame_add_frame_nodes(void *p_graph);
+	// Shutdown: submit whatever the ring still holds, under the device grant.
+	void _macrame_drain_handoff();
 #else
 	mutable CommandQueueMT command_queue;
 #endif
@@ -122,9 +154,9 @@ class RenderingServerDefault : public RenderingServer {
 	void _thread_exit();
 	void _thread_loop();
 
-	// `p_submit_slot` >= 0 runs the split draw: record the frame, then hand it to a device task
-	// launched into `submit_tasks[p_submit_slot]` instead of submitting inline.
-	void _draw(bool p_swap_buffers, double frame_step, int p_submit_slot);
+	// `p_handoff_slot` >= 0 runs the split draw: record the frame and stage it into
+	// `handoff_ring[p_handoff_slot]` for the submit node instead of submitting inline.
+	void _draw(bool p_swap_buffers, double frame_step, int p_handoff_slot);
 	void _run_post_draw_steps();
 	void _init();
 	void _finish();
@@ -151,7 +183,7 @@ public:
 
 #define WRITE_ACTION redraw_request();
 #ifdef MACRAME_ENABLED
-#define RS_ON_SERVER_THREAD (command_queue.may_call_direct())
+#define RS_ON_SERVER_THREAD (command_queue.should_call_direct())
 #else
 #define RS_ON_SERVER_THREAD (RS_ON_SERVER_THREAD)
 #endif
@@ -1329,16 +1361,15 @@ public:
 	virtual void init() override;
 	virtual void finish() override;
 #ifdef MACRAME_ENABLED
-	// Shutdown drain, called once the main loop is gone. `sync()` deliberately does nothing
-	// while a draw is in flight (joining it every frame would serialize the simulation behind
-	// rendering), so without this the commands the scene's teardown stages - freeing viewports,
-	// scenarios, instances - would first be applied inside `finish()`, by which point
-	// `Main::cleanup` has unloaded the server modules those commands call into
-	// (`RendererSceneOcclusionCull::get_singleton()` is one, and it is not null-checked).
-	void macrame_drain_commands() {
-		command_queue.wait();
-		command_queue.sync();
-	}
+	// Shutdown drain, called once the main loop is gone (so no graph will run again). `sync()`
+	// deliberately does nothing in frame-graph mode - applying the batch on the blue thread every
+	// frame is exactly what the render node is for - so without this the commands the scene's
+	// teardown stages (freeing viewports, scenarios, instances) would first be applied inside
+	// `finish()`, by which point `Main::cleanup` has unloaded the server modules those commands
+	// call into (`RendererSceneOcclusionCull::get_singleton()` is one, and it is not
+	// null-checked). It also submits whatever the hand-off ring still holds: the last run's
+	// render node staged a frame that no submit node will ever consume.
+	void macrame_drain_commands();
 #endif
 	virtual void tick() override;
 	virtual void pre_draw(bool p_will_draw) override;

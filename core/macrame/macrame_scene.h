@@ -93,9 +93,10 @@ void run_groups(SceneTree *p_tree, void **p_groups, int p_group_count, bool p_ph
 // (catch-up) N physics ticks, so there is one compiled graph per frame shape, sharing the same
 // node bodies and the same guarded objects - no node ever runs as a no-op:
 //
-//   tick_frame  32 tick shards + physics step + navigation + 32 frame shards (edge i -> i)
-//   plain_frame 32 frame shards (an iteration with no tick)
-//   tick_only   32 tick shards + physics step + navigation (each catch-up tick)
+//   tick_frame  64 tick shards + physics step + navigation + 64 frame shards (edge i -> i)
+//                 + render + submit
+//   plain_frame 64 frame shards (an iteration with no tick) + render + submit
+//   tick_only   64 tick shards + physics step + navigation (each catch-up tick)
 //
 // An iteration with N ticks runs `tick_only` N-1 times inside the physics loop, then
 // `tick_frame` after the process phase; an iteration with no tick runs `plain_frame`.
@@ -108,4 +109,20 @@ void frame_set_capturing(bool p_capturing);
 void frame_set_tick(double p_step); // The step this tick's `physics step` and `navigation` nodes use.
 void frame_execute_tick(SceneTree *p_tree); // A catch-up tick: the `tick_only` graph, inside the physics loop.
 void frame_execute(SceneTree *p_tree, bool p_with_tick); // `tick_frame` (a tick was captured) or `plain_frame`.
+
+// The renderer's two nodes - `render` (writes the render server's guarded state) and `submit`
+// (writes the device's) - are added to every graph that has a frame phase, by a callback the
+// rendering server registers at construction. The parameter is a `ts::Static_task_graph *`,
+// erased because this header is included by `scene/main/node.h` and must stay free of the task
+// system's includes; the callback lives in `rendering_server_default.cpp`, which owns both
+// guarded objects and both bodies.
+using FrameNodeAdder = void (*)(void *p_graph);
+void set_frame_render_nodes(FrameNodeAdder p_adder);
+
+// Whether the frame graph is actually running this iteration's middle. `Main::iteration` decides
+// (it also needs a scene tree) and sets it; the renderer reads it to choose between "post the
+// frame for the graph's render node" and "draw synchronously on this thread", which is what the
+// boot-time draws before the first iteration are. Not the same as `frame_graph_enabled()`.
+bool frame_graph_running();
+void frame_set_graph_running(bool p_running);
 } // namespace MacrameScene
