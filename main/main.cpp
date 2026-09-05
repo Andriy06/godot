@@ -4947,6 +4947,15 @@ bool Main::iteration() {
 
 	bool exit = false;
 
+#ifdef MACRAME_ENABLED
+	// Macrame: the frame's parallel middle is a compiled static graph, one per frame shape.
+	// An iteration carrying N physics ticks runs the `tick_only` graph (tick shards, the step,
+	// navigation) for each of the first N-1 ticks, then the `tick_frame` graph (those nodes plus
+	// the process shards) after the process phase; an iteration with no tick runs `plain_frame`.
+	const bool macrame_graph = MacrameScene::frame_graph_enabled() && SceneTree::get_singleton() != nullptr;
+	bool macrame_tick_captured = false; // The last tick's shard batches are waiting for `tick_frame`.
+#endif
+
 	// process all our active interfaces
 #ifndef XR_DISABLED
 	GodotProfileZoneGrouped(_profile_zone, "xr_server->_process");
@@ -4985,8 +4994,8 @@ bool Main::iteration() {
 #endif // PHYSICS_2D_DISABLED
 
 #ifdef MACRAME_ENABLED
-		const bool macrame_graph_tick = MacrameScene::frame_graph_enabled() && SceneTree::get_singleton() != nullptr && iters == advance.physics_steps - 1;
-		MacrameScene::frame_set_capturing(macrame_graph_tick); // The last tick's shard batches go to the frame graph.
+		const bool macrame_last_tick = iters == advance.physics_steps - 1;
+		MacrameScene::frame_set_capturing(macrame_graph); // Every tick's shard batches go to a graph.
 #endif
 		GodotProfileZoneGrouped(_physics_zone, "physics_process");
 		if (OS::get_singleton()->get_main_loop()->physics_process(physics_step * time_scale)) {
@@ -5011,8 +5020,9 @@ bool Main::iteration() {
 		GodotProfileZoneGrouped(_profile_zone, "3D physics");
 		PhysicsServer3D::get_singleton()->end_sync();
 #ifdef MACRAME_ENABLED
-		if (macrame_graph_tick) {
+		if (macrame_graph) {
 			MacrameScene::frame_set_tick(physics_step * time_scale); // The graph's step node runs it after the tick shards.
+			macrame_tick_captured = macrame_tick_captured || macrame_last_tick;
 		} else {
 			PhysicsServer3D::get_singleton()->step(physics_step * time_scale);
 		}
@@ -5037,8 +5047,13 @@ bool Main::iteration() {
 #ifndef NAVIGATION_3D_DISABLED
 		GodotProfileZoneGrouped(_profile_zone, "NavigationServer3D::physics_process");
 #ifdef MACRAME_ENABLED
-		if (!macrame_graph_tick) {
+		if (!macrame_graph) {
 			NavigationServer3D::get_singleton()->physics_process(physics_step * time_scale);
+		} else if (!macrame_last_tick) {
+			// A catch-up tick: its shards, the step and the navigation update are the `tick_only`
+			// graph, run here, where the step and the navigation update would have been. The last
+			// tick's nodes belong to `tick_frame`, which runs after the process phase.
+			MacrameScene::frame_execute_tick(SceneTree::get_singleton());
 		}
 #else
 		NavigationServer3D::get_singleton()->physics_process(physics_step * time_scale);
@@ -5069,8 +5084,7 @@ bool Main::iteration() {
 	uint64_t process_begin = OS::get_singleton()->get_ticks_usec();
 
 #ifdef MACRAME_ENABLED
-	const bool macrame_graph_frame = MacrameScene::frame_graph_enabled() && SceneTree::get_singleton() != nullptr;
-	MacrameScene::frame_set_capturing(macrame_graph_frame);
+	MacrameScene::frame_set_capturing(macrame_graph);
 #endif
 	GodotProfileZoneGrouped(_profile_zone, "process");
 	if (OS::get_singleton()->get_main_loop()->process(process_step * time_scale)) {
@@ -5078,9 +5092,11 @@ bool Main::iteration() {
 	}
 	message_queue->flush();
 #ifdef MACRAME_ENABLED
-	if (macrame_graph_frame) {
-		// The frame graph: the captured tick shards, the step, navigation, the captured process shards.
-		MacrameScene::frame_execute(SceneTree::get_singleton());
+	if (macrame_graph) {
+		// `tick_frame` (the captured tick shards, the step, navigation, the captured process
+		// shards) when this iteration's last tick was captured, else `plain_frame` (the process
+		// shards alone). No node runs as a no-op either way.
+		MacrameScene::frame_execute(SceneTree::get_singleton(), macrame_tick_captured);
 		message_queue->flush();
 	}
 #endif
